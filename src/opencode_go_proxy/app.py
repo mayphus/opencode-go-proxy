@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import http.client
 import json
 import os
 import signal
+import struct
 import subprocess
 import sys
 import threading
@@ -15,8 +19,10 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import __version__
+from .codex_config import configure_codex
 from .protocol import (
     DEFAULT_MODEL,
     IMAGE_MODEL_DEFAULT,
@@ -59,7 +65,14 @@ def trace(event: str, **fields: Any) -> None:
 
 
 class ResponsesProxyHandler(BaseHTTPRequestHandler):
+    # Codex streaming and WebSocket-compatible clients require HTTP/1.1.
+    protocol_version = "HTTP/1.1"
+
     def do_GET(self) -> None:
+        if self.path in {"/responses", "/v1/responses"} and self.headers.get("upgrade", "").lower() == "websocket":
+            config: ProxyConfig = self.server.config  # type: ignore[attr-defined]
+            handle_websocket_responses(self, config)
+            return
         if self.path in {"/health", "/v1/health"}:
             self._send_json({"status": "ok"})
             return
@@ -94,6 +107,7 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
                     self.send_response(HTTPStatus.OK)
                     self.send_header("content-type", "text/event-stream")
                     self.send_header("cache-control", "no-cache")
+                    self.send_header("connection", "close")
                     self.end_headers()
                     handle_native_responses_stream(payload, config, request_id, self.wfile)
                 else:
@@ -104,6 +118,7 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
                 self.send_response(HTTPStatus.OK)
                 self.send_header("content-type", "text/event-stream")
                 self.send_header("cache-control", "no-cache")
+                self.send_header("connection", "close")
                 self.end_headers()
                 try:
                     handle_streaming_request(payload, config, request_id, self.wfile)
@@ -164,6 +179,53 @@ class ProxyError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+class PersistentUpstreamConnection:
+    """Reuse one HTTP(S) connection for all turns on a WebSocket session."""
+
+    def __init__(self, config: ProxyConfig) -> None:
+        parsed = urlsplit(config.chat_base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ProxyError(HTTPStatus.BAD_GATEWAY, "invalid upstream base URL")
+        self._connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        self._host = parsed.hostname
+        self._port = parsed.port
+        self._timeout = config.timeout_sec
+        self._connection: http.client.HTTPConnection | None = None
+        self._path = f"{parsed.path.rstrip('/')}/responses"
+
+    def request(self, payload: bytes, api_key: str, config: ProxyConfig) -> http.client.HTTPResponse:
+        try:
+            if self._connection is None:
+                self._connection = self._connection_type(self._host, self._port, timeout=self._timeout)
+            self._connection.request(
+                "POST",
+                self._path,
+                body=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                    "User-Agent": os.environ.get("OPENCODE_GO_PROXY_USER_AGENT", "codex/1.0"),
+                },
+            )
+            response = self._connection.getresponse()
+            if response.status >= 400:
+                body = response.read().decode("utf-8", errors="replace")
+                raise ProxyError(
+                    HTTPStatus.BAD_GATEWAY,
+                    f"upstream Responses HTTP {response.status}: {body[:500]}",
+                )
+            return response
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            self.close()
+            raise ProxyError(HTTPStatus.BAD_GATEWAY, f"upstream connection error: {exc}") from exc
+
+    def close(self) -> None:
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
 
 
 def handle_responses_request(payload: Json, config: ProxyConfig, request_id: str) -> Json:
@@ -263,6 +325,183 @@ def handle_native_responses_stream(payload: Json, config: ProxyConfig, request_i
         wfile.flush()
     except urllib.error.URLError as exc:
         trace("upstream.responses.network_error", request_id=request_id, reason=str(exc.reason))
+
+
+def _read_ws_frame(rfile: Any) -> tuple[int, bytes] | None:
+    header = rfile.read(2)
+    if len(header) != 2:
+        return None
+    first, second = header
+    opcode = first & 0x0F
+    masked = bool(second & 0x80)
+    length = second & 0x7F
+    if length == 126:
+        raw_length = rfile.read(2)
+        if len(raw_length) != 2:
+            return None
+        length = struct.unpack("!H", raw_length)[0]
+    elif length == 127:
+        raw_length = rfile.read(8)
+        if len(raw_length) != 8:
+            return None
+        length = struct.unpack("!Q", raw_length)[0]
+    if length > 20 * 1024 * 1024:
+        raise ProxyError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "WebSocket frame exceeds 20MB cap")
+    mask = rfile.read(4) if masked else b""
+    payload = rfile.read(length)
+    if len(payload) != length:
+        return None
+    if masked:
+        payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+    return opcode, payload
+
+
+def _write_ws_frame(wfile: Any, payload: bytes, opcode: int = 1) -> None:
+    length = len(payload)
+    if length < 126:
+        header = bytes([0x80 | opcode, length])
+    elif length <= 0xFFFF:
+        header = bytes([0x80 | opcode, 126]) + struct.pack("!H", length)
+    else:
+        header = bytes([0x80 | opcode, 127]) + struct.pack("!Q", length)
+    wfile.write(header + payload)
+    wfile.flush()
+
+
+def _write_ws_json(wfile: Any, value: Json) -> None:
+    _write_ws_frame(wfile, json.dumps(value, separators=(",", ":")).encode("utf-8"))
+
+
+def _stream_native_response_events(
+    payload: Json,
+    config: ProxyConfig,
+    request_id: str,
+    on_event: Any,
+    upstream: PersistentUpstreamConnection | None = None,
+) -> None:
+    """Stream native Responses events from Go and pass decoded JSON to a transport."""
+    api_key = resolve_api_key(config, request_id)
+    upstream_payload = sanitize_websocket_payload(payload)
+    upstream_payload["model"] = normalize_model_slug(upstream_payload.get("model"))
+    upstream_payload["stream"] = True
+    input_value = upstream_payload.get("input")
+    input_types = []
+    if isinstance(input_value, list):
+        input_types = sorted({item.get("type", "<missing>") for item in input_value if isinstance(item, dict)})
+    tool_types = sorted({tool.get("type", "<missing>") for tool in upstream_payload.get("tools", []) if isinstance(tool, dict)})
+    trace(
+        "websocket.payload",
+        request_id=request_id,
+        keys=sorted(upstream_payload),
+        input_types=input_types,
+        tool_types=tool_types,
+        input_items=len(input_value) if isinstance(input_value, list) else None,
+    )
+    raw_payload = json.dumps(upstream_payload, separators=(",", ":")).encode("utf-8")
+    if upstream is None:
+        upstream = PersistentUpstreamConnection(config)
+    trace("upstream.websocket.start", request_id=request_id, url=f"{config.chat_base_url}/responses", bytes=len(raw_payload))
+    try:
+        response = upstream.request(raw_payload, api_key, config)
+        for line in response:
+            decoded = line.decode("utf-8", errors="replace").strip()
+            if not decoded.startswith("data: "):
+                continue
+            data = decoded[6:]
+            if data == "[DONE]":
+                return
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                on_event(event)
+    except ProxyError as exc:
+        trace("upstream.websocket.error", request_id=request_id, status=exc.status, body=exc.message[:4000])
+        raise
+
+
+def sanitize_websocket_payload(payload: Json) -> Json:
+    """Keep only portable Responses fields for the HTTP Go backend."""
+    allowed_keys = {
+        "model",
+        "input",
+        "instructions",
+        "tools",
+        "tool_choice",
+        "max_output_tokens",
+        "temperature",
+        "top_p",
+        "previous_response_id",
+        "store",
+        "reasoning",
+        "text",
+        "parallel_tool_calls",
+    }
+    upstream_payload = {key: value for key, value in payload.items() if key in allowed_keys}
+    input_items = upstream_payload.get("input")
+    if isinstance(input_items, list):
+        sanitized_items = []
+        for item in input_items:
+            if not isinstance(item, dict):
+                sanitized_items.append(item)
+                continue
+            item_type = item.get("type")
+            if item_type == "additional_tools":
+                continue
+            if item_type == "reasoning":
+                # The upstream response already owns prior reasoning state. Replaying
+                # encrypted reasoning blobs only increases prompt size and latency.
+                continue
+            if item_type == "custom_tool_call_output":
+                item = dict(item)
+                item["type"] = "function_call_output"
+            sanitized_items.append(item)
+        upstream_payload["input"] = sanitized_items
+    return upstream_payload
+
+
+def handle_websocket_responses(handler: ResponsesProxyHandler, config: ProxyConfig) -> None:
+    key = handler.headers.get("sec-websocket-key")
+    if not key or handler.headers.get("sec-websocket-version") != "13":
+        handler.send_error(HTTPStatus.BAD_REQUEST, "WebSocket version 13 and key are required")
+        return
+    accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+    handler.send_response_only(HTTPStatus.SWITCHING_PROTOCOLS)
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    trace("websocket.connected", path=handler.path)
+    upstream = PersistentUpstreamConnection(config)
+
+    try:
+        while True:
+            frame = _read_ws_frame(handler.rfile)
+            if frame is None:
+                return
+            opcode, payload = frame
+            if opcode == 8:  # close
+                _write_ws_frame(handler.wfile, payload[:125], opcode=8)
+                return
+            if opcode == 9:  # ping
+                _write_ws_frame(handler.wfile, payload[:125], opcode=10)
+                continue
+            if opcode != 1:
+                _write_ws_json(handler.wfile, {"type": "error", "error": {"message": "text WebSocket frames are required"}})
+                continue
+            try:
+                event = json.loads(payload.decode("utf-8"))
+                if not isinstance(event, dict) or event.get("type") != "response.create":
+                    raise ValueError("expected a response.create event")
+                request_id = uuid.uuid4().hex[:12]
+                _stream_native_response_events(event, config, request_id, lambda response_event: _write_ws_json(handler.wfile, response_event), upstream)
+            except (ProxyError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
+                message = getattr(exc, "message", str(exc))
+                trace("websocket.request_failed", message=message)
+                _write_ws_json(handler.wfile, {"type": "error", "error": {"message": message}})
+    finally:
+        upstream.close()
 
 
 def handle_streaming_request(payload: Json, config: ProxyConfig, request_id: str, wfile: Any) -> None:
@@ -696,11 +935,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key-env", default=os.environ.get("OPENCODE_GO_PROXY_API_KEY_ENV", "OPENCODE_GO_API_KEY"))
     parser.add_argument("--timeout-sec", type=float, default=float(os.environ.get("OPENCODE_GO_PROXY_TIMEOUT_SEC", "180")))
     parser.add_argument("--max-body-mb", type=int, default=int(os.environ.get("OPENCODE_GO_PROXY_MAX_BODY_MB", "20")))
+    parser.add_argument(
+        "--configure-codex",
+        action="store_true",
+        help="create the OpenCode Go Luna provider, profile, and model catalog, then exit",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.configure_codex:
+        config_path, catalog_path = configure_codex()
+        print(f"Codex configured: {config_path}")
+        print(f"Model catalog: {catalog_path}")
+        return
     config = ProxyConfig(
         bind=args.bind,
         port=args.port,

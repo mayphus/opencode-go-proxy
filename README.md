@@ -62,6 +62,22 @@ features = { memories = false }
 codex -p deepseek-v4-flash
 ```
 
+### Automatic Codex setup
+
+To configure only the OpenCode Go GPT 5.6 Luna provider/profile and model selector entry:
+
+```bash
+uv run opencode-go-proxy --configure-codex
+```
+
+This is idempotent. It creates or preserves `~/.codex/config.toml`, writes the Luna-only
+catalog to `~/.codex/model-catalogs/opencode-go.json`, and adds the `gpt-5.6-luna` profile.
+Set `CODEX_HOME` to use a different Codex directory. Start it with:
+
+```bash
+codex -p gpt-5.6-luna
+```
+
 ## Available models
 
 All OpenCode Go models work through this proxy. GPT 5.6 Luna uses native Responses passthrough;
@@ -177,6 +193,7 @@ See the [lazycodex docs](https://github.com/code-yeongyu/oh-my-openagent) for se
 - Custom/freeform tool adaptation (Codex `apply_patch` works)
 - Reasoning content replay across tool-call turns
 - Real-time SSE streaming (not synthesized)
+- Responses WebSocket mode for Codex Desktop, bridged to upstream Responses SSE
 - Image captioning via MiMo V2.5 when tools are present (override with `CODEX_IMAGE_MODEL`)
 - SSRF protection on image URLs (`data:image/` and `https://` only)
 - Configurable body cap, bind address guard, keychain credential resolution
@@ -210,6 +227,27 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.opencode-go.proxy.pl
 
 The proxy is designed for launchd's `KeepAlive` — it restarts on crash and
 starts at login. Logs go to `~/.codex/logs/opencode-go-proxy.{log,err}`.
+
+### Windows (background + startup)
+
+Install a per-user Task Scheduler entry that starts the proxy hidden at login and
+restarts it after crashes:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\contrib\windows\opencode-go-proxy-task.ps1 -Install
+```
+
+The task uses the current checkout and starts the proxy on `127.0.0.1:8787`.
+Make sure `OPENCODE_GO_API_KEY` is set as a persistent User environment variable,
+not only in the current terminal session. Logs are written to
+`$HOME\.codex\logs\opencode-go-proxy.log` and
+`$HOME\.codex\logs\opencode-go-proxy.err.log`.
+
+```powershell
+.\contrib\windows\opencode-go-proxy-task.ps1 -Status
+.\contrib\windows\opencode-go-proxy-task.ps1 -Uninstall
+```
 
 ## Configuration
 

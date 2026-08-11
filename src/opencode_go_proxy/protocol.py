@@ -44,9 +44,12 @@ def _load_catalog_models() -> set[str]:
     """Load known model slugs from the catalog JSON file."""
     catalog_path = os.environ.get("CODEX_MODEL_CATALOG", os.path.expanduser("~/.codex/model-catalogs/opencode-go.json"))
     try:
-        with open(catalog_path) as f:
+        with open(catalog_path, encoding="utf-8-sig") as f:
             catalog = json.load(f)
-        return {m["slug"] for m in catalog.get("models", []) if isinstance(m, dict) and "slug" in m}
+        catalog_models = {m["slug"] for m in catalog.get("models", []) if isinstance(m, dict) and "slug" in m}
+        # The Codex selector catalog may intentionally contain only one model. The proxy
+        # still needs its own fallback and legacy vision models available at /models.
+        return catalog_models | {DEFAULT_MODEL, IMAGE_MODEL_DEFAULT}
     except (OSError, json.JSONDecodeError, KeyError):
         return {DEFAULT_MODEL, IMAGE_MODEL_DEFAULT}
 

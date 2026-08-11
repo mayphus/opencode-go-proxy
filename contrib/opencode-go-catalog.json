@@ -1,7 +1,7 @@
 {
   "fetched_at": "2026-06-22T10:18:00.000000Z",
   "etag": "W/\"opencode-go-catalog-v0.1.2\"",
-  "client_version": "0.142.0",
+  "client_version": "0.147.0",
   "models": [
     {
       "slug": "gpt-5.6-luna",
@@ -22,6 +22,20 @@
       "service_tiers": [],
       "availability_nux": null,
       "upgrade": null,
+      "model_messages": {
+        "instructions_template": "You are Codex, an agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.",
+        "instructions_variables": null,
+        "approvals": null,
+        "collaboration_modes": null,
+        "auto_review": null,
+        "permissions": null,
+        "token_budget": {
+          "reminder_threshold_tokens": 6144,
+          "auto_compact_token_limit": 250000
+        }
+      },
+      "include_skills_usage_instructions": false,
+      "include_plugin_usage_instructions": true,
       "supports_reasoning_summaries": true,
       "default_reasoning_summary": "none",
       "support_verbosity": false,
@@ -30,14 +44,17 @@
       "web_search_tool_type": "text_and_image",
       "truncation_policy": {"mode": "tokens", "limit": 10000},
       "supports_parallel_tool_calls": true,
-      "supports_image_detail_original": false,
+      "supports_image_detail_original": true,
       "context_window": 272000,
       "max_context_window": 272000,
       "effective_context_window_percent": 95,
       "experimental_supported_tools": [],
       "input_modalities": ["text", "image"],
       "supports_search_tool": true,
-      "use_responses_lite": false
+      "use_responses_lite": true,
+      "tool_mode": "code_mode_only",
+      "multi_agent_version": "v2",
+      "auto_compact_token_limit": 250000
     },
     {
       "slug": "deepseek-v4-flash",
