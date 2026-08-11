@@ -24,9 +24,11 @@ from .protocol import (
     chat_completion_to_response,
     chat_message_to_response_output,
     new_response_id,
+    normalize_model_slug,
     normalize_usage,
     now_unix,
     responses_payload_to_chat_payload,
+    supports_native_responses,
 )
 
 Json = dict[str, Any]
@@ -86,6 +88,17 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
                 model=payload.get("model"),
                 stream=payload.get("stream", False),
             )
+            if supports_native_responses(payload.get("model")):
+                payload["model"] = normalize_model_slug(payload.get("model"))
+                if payload.get("stream") is True:
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("content-type", "text/event-stream")
+                    self.send_header("cache-control", "no-cache")
+                    self.end_headers()
+                    handle_native_responses_stream(payload, config, request_id, self.wfile)
+                else:
+                    self._send_json(call_upstream_responses(payload, config, request_id))
+                return
             if payload.get("stream") is True:
                 # Real streaming: send SSE headers, then stream from upstream in real-time.
                 self.send_response(HTTPStatus.OK)
@@ -178,6 +191,78 @@ def handle_responses_request(payload: Json, config: ProxyConfig, request_id: str
         usage=response.get("usage"),
     )
     return response
+
+
+def call_upstream_responses(payload: Json, config: ProxyConfig, request_id: str) -> Json:
+    """Call a Responses-native Go model without converting its request shape."""
+    api_key = resolve_api_key(config, request_id)
+    url = f"{config.chat_base_url}/responses"
+    raw_payload = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=raw_payload,
+        headers={
+            "authorization": f"Bearer {api_key}",
+            "content-type": "application/json",
+            "accept": "application/json",
+            "user-agent": os.environ.get("OPENCODE_GO_PROXY_USER_AGENT", "codex/1.0"),
+        },
+        method="POST",
+    )
+    trace("upstream.responses.start", request_id=request_id, url=url, bytes=len(raw_payload))
+    try:
+        with urllib.request.urlopen(request, timeout=config.timeout_sec) as response:
+            body = response.read()
+            value = json.loads(body)
+            if not isinstance(value, dict):
+                raise ProxyError(HTTPStatus.BAD_GATEWAY, "upstream returned non-object JSON")
+            trace("upstream.responses.done", request_id=request_id, status=response.status, bytes=len(body))
+            return value
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        trace("upstream.responses.error", request_id=request_id, status=exc.code, body=body[:2000])
+        raise ProxyError(HTTPStatus.BAD_GATEWAY, f"upstream Responses HTTP {exc.code}") from exc
+    except json.JSONDecodeError as exc:
+        raise ProxyError(HTTPStatus.BAD_GATEWAY, "upstream returned invalid JSON") from exc
+    except urllib.error.URLError as exc:
+        raise ProxyError(HTTPStatus.BAD_GATEWAY, f"upstream network error: {exc.reason}") from exc
+
+
+def handle_native_responses_stream(payload: Json, config: ProxyConfig, request_id: str, wfile: Any) -> None:
+    """Forward native Responses SSE events unchanged."""
+    try:
+        api_key = resolve_api_key(config, request_id)
+    except ProxyError as exc:
+        error = json.dumps({"type": "response.error", "error": {"message": exc.message}}, separators=(",", ":"))
+        wfile.write(b"data: " + error.encode("utf-8") + b"\n\ndata: [DONE]\n\n")
+        wfile.flush()
+        return
+    url = f"{config.chat_base_url}/responses"
+    raw_payload = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=raw_payload,
+        headers={
+            "authorization": f"Bearer {api_key}",
+            "content-type": "application/json",
+            "accept": "text/event-stream",
+            "user-agent": os.environ.get("OPENCODE_GO_PROXY_USER_AGENT", "codex/1.0"),
+        },
+        method="POST",
+    )
+    trace("upstream.responses.start", request_id=request_id, url=url, bytes=len(raw_payload), stream=True)
+    try:
+        with urllib.request.urlopen(request, timeout=config.timeout_sec) as response:
+            for line in response:
+                wfile.write(line)
+                wfile.flush()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        trace("upstream.responses.error", request_id=request_id, status=exc.code, body=body[:2000])
+        wfile.write(b'data: {"type":"response.error","error":{"message":"upstream Responses error"}}\n\ndata: [DONE]\n\n')
+        wfile.flush()
+    except urllib.error.URLError as exc:
+        trace("upstream.responses.network_error", request_id=request_id, reason=str(exc.reason))
 
 
 def handle_streaming_request(payload: Json, config: ProxyConfig, request_id: str, wfile: Any) -> None:

@@ -11,11 +11,26 @@ Json = dict[str, Any]
 DEFAULT_MODEL = "deepseek-v4-flash"
 IMAGE_MODEL_DEFAULT = "mimo-v2.5"
 
+# GPT 5.6 Luna is exposed by OpenCode Go through the Responses API. Keep its
+# native request path so Responses-only tools and multimodal input survive.
+MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
+    "gpt-5.6-luna": {
+        "native_responses": True,
+        "supports_image": True,
+        "supports_search": True,
+    },
+}
+NATIVE_RESPONSES_MODELS = {
+    model for model, capabilities in MODEL_CAPABILITIES.items()
+    if capabilities.get("native_responses")
+}
+
 # Map OpenAI/Codex model slugs to OpenCode Go equivalents.
 # When Codex sends a model not in the catalog, the alias map provides the replacement.
 # If no alias exists, DEFAULT_MODEL is used.
 # DeepSeek V4 Flash is the default — cheapest non-vision model on Go ($10/mo gets ~158k requests/mo).
 MODEL_ALIASES: dict[str, str] = {
+    "gpt-5.6-luna": "gpt-5.6-luna",
     "gpt-5.5": "deepseek-v4-pro",
     "gpt-5.4-mini": "deepseek-v4-flash",
     "gpt-5": "deepseek-v4-pro",
@@ -37,6 +52,21 @@ def _load_catalog_models() -> set[str]:
 
 
 KNOWN_MODELS: set[str] = _load_catalog_models()
+KNOWN_MODELS.update(MODEL_CAPABILITIES)
+
+
+def normalize_model_slug(model: Any) -> str:
+    """Normalize Codex/OpenCode model names to the OpenCode Go model id."""
+    if not isinstance(model, str) or not model:
+        return DEFAULT_MODEL
+    model = model.removeprefix("opencode-go/")
+    if model in MODEL_ALIASES:
+        return MODEL_ALIASES[model]
+    return model if model in KNOWN_MODELS else DEFAULT_MODEL
+
+
+def supports_native_responses(model: Any) -> bool:
+    return normalize_model_slug(model) in NATIVE_RESPONSES_MODELS
 
 
 def new_response_id() -> str:
@@ -404,13 +434,7 @@ def responses_payload_to_chat_payload(payload: Json) -> tuple[Json, str, Json]:
     messages, message_stats = responses_input_to_chat_messages(payload)
     tools, tool_stats = responses_tools_to_chat_tools(payload.get("tools"))
 
-    incoming_model = payload.get("model", DEFAULT_MODEL)
-    # Normalize: if model is in the alias map, use the mapped OpenCode Go model.
-    # If it's not a known catalog model and not aliased, fall back to DEFAULT_MODEL.
-    if incoming_model in MODEL_ALIASES:
-        incoming_model = MODEL_ALIASES[incoming_model]
-    elif incoming_model not in KNOWN_MODELS:
-        incoming_model = DEFAULT_MODEL
+    incoming_model = normalize_model_slug(payload.get("model", DEFAULT_MODEL))
     # Detect images by scanning for actual image_url parts (not just list-shaped content).
     has_image = any(
         isinstance(m.get("content"), list)

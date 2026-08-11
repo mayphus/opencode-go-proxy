@@ -1,10 +1,16 @@
+import json
 import os
 import subprocess
 import unittest
 from http import HTTPStatus
 from unittest import mock
 
-from opencode_go_proxy.app import ProxyConfig, ProxyError, resolve_api_key
+from opencode_go_proxy.app import (
+    ProxyConfig,
+    ProxyError,
+    call_upstream_responses,
+    resolve_api_key,
+)
 
 
 def make_config() -> ProxyConfig:
@@ -55,6 +61,31 @@ class CredentialTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status, HTTPStatus.UNAUTHORIZED)
         self.assertIn("$OPENCODE_GO_API_KEY", ctx.exception.message)
         self.assertIn("keychain", ctx.exception.message)
+
+
+class NativeResponsesTests(unittest.TestCase):
+    def test_luna_payload_is_sent_to_responses_endpoint_unchanged(self) -> None:
+        upstream_response = mock.MagicMock()
+        upstream_response.status = 200
+        upstream_response.read.return_value = json.dumps({"id": "resp_1", "output": []}).encode()
+        with mock.patch.dict(os.environ, {"OPENCODE_GO_API_KEY": "test-key"}), mock.patch(
+            "opencode_go_proxy.app.urllib.request.urlopen", return_value=upstream_response
+        ) as urlopen:
+            upstream_response.__enter__.return_value = upstream_response
+            result = call_upstream_responses(
+                {"model": "gpt-5.6-luna", "input": "hello", "tools": [{"type": "web_search_preview"}]},
+                make_config(),
+                "req",
+            )
+
+        self.assertEqual(result["id"], "resp_1")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://opencode.ai/zen/go/v1/responses")
+        self.assertEqual(json.loads(request.data), {
+            "model": "gpt-5.6-luna",
+            "input": "hello",
+            "tools": [{"type": "web_search_preview"}],
+        })
 
 
 if __name__ == "__main__":

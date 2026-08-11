@@ -7,8 +7,9 @@
 
 Use your [OpenCode Go](https://opencode.ai/docs/go) subscription in the [Codex app](https://github.com/openai/codex).
 
-Codex expects a Responses API (`/v1/responses`). OpenCode Go exposes an OpenAI-compatible
-Chat Completions API (`/v1/chat/completions`). This proxy bridges that gap in one local process:
+Codex expects a Responses API (`/v1/responses`). Most OpenCode Go models expose an
+OpenAI-compatible Chat Completions API (`/v1/chat/completions`), which this proxy bridges in
+one local process. Responses-native models such as GPT 5.6 Luna are passed through unchanged:
 
 ```text
 Codex app
@@ -17,9 +18,9 @@ Codex app
     ▼
 opencode-go-proxy  ←── localhost:8787, zero deps, stdlib only
     │
-    │  POST /v1/chat/completions (Chat Completions API)
+    │  POST /v1/chat/completions or /v1/responses
     ▼
-OpenCode Go  ────── 13 models: DeepSeek, GLM, Kimi, MiMo, MiniMax, Qwen
+OpenCode Go  ────── open coding models, including GPT 5.6 Luna
 ```
 
 ## Why
@@ -63,7 +64,8 @@ codex -p deepseek-v4-flash
 
 ## Available models
 
-All 13 OpenCode Go models work through this proxy. The defaults are DeepSeek V4 Flash
+All OpenCode Go models work through this proxy. GPT 5.6 Luna uses native Responses passthrough;
+the defaults are DeepSeek V4 Flash
 (cheapest general-purpose) and MiMo V2.5 (cheapest vision, used for image captioning).
 Switch to whatever you want — just change the model in your Codex profile.
 
@@ -131,9 +133,11 @@ The proxy picks the upstream model based on what Codex sends:
 2. If the model slug is a known OpenCode Go model (from the catalog), it's used as-is.
 3. Otherwise, it falls back to `deepseek-v4-flash`.
 
-When images are present in a turn with tools, the proxy routes to MiMo V2.5 for image
-captioning (it's the cheapest vision model on Go), then routes the main turn to your
-configured model. Override the vision model with `CODEX_IMAGE_MODEL`.
+When images are present in a turn with tools, Chat Completions models route to MiMo V2.5 for
+image captioning (it's the cheapest vision model on Go), then route the main turn to your
+configured model. Responses-native models with native image/search support, including GPT 5.6
+Luna, bypass this fallback and keep the original image and hosted-tool payload. Override the
+legacy vision model with `CODEX_IMAGE_MODEL`.
 
 ## API key
 

@@ -3,10 +3,15 @@ import unittest
 from opencode_go_proxy.protocol import (
     chat_completion_to_response,
     responses_payload_to_chat_payload,
+    supports_native_responses,
 )
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_gpt_5_6_luna_is_responses_native(self) -> None:
+        self.assertTrue(supports_native_responses("gpt-5.6-luna"))
+        self.assertTrue(supports_native_responses("opencode-go/gpt-5.6-luna"))
+
     def test_string_input_maps_to_user_message(self) -> None:
         chat, _model, stats = responses_payload_to_chat_payload(
             {"model": "deepseek-v4-flash", "instructions": "be terse", "input": "hello"}
