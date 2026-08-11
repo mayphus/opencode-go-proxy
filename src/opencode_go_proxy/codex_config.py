@@ -21,7 +21,7 @@ CATALOG: dict[str, Any] = {
             "description": "Responses-native GPT model with image input and web search.",
             "default_reasoning_level": "high",
             "supported_reasoning_levels": [
-                {"effort": effort} for effort in ("low", "medium", "high", "xhigh")
+                {"effort": effort} for effort in ("none", "low", "medium", "high", "xhigh", "max")
             ],
             "shell_type": "shell_command",
             "visibility": "list",
@@ -40,7 +40,7 @@ CATALOG: dict[str, Any] = {
                 "permissions": None,
                 "token_budget": {
                     "reminder_threshold_tokens": 6144,
-                    "auto_compact_token_limit": 250000,
+                    "auto_compact_token_limit": 1000000,
                 },
             },
             "include_skills_usage_instructions": False,
@@ -54,8 +54,8 @@ CATALOG: dict[str, Any] = {
             "truncation_policy": {"mode": "tokens", "limit": 10000},
             "supports_parallel_tool_calls": True,
             "supports_image_detail_original": True,
-            "context_window": 272000,
-            "max_context_window": 272000,
+            "context_window": 1050000,
+            "max_context_window": 1050000,
             "effective_context_window_percent": 95,
             "experimental_supported_tools": [],
             "input_modalities": ["text", "image"],
@@ -63,7 +63,7 @@ CATALOG: dict[str, Any] = {
             "use_responses_lite": True,
             "tool_mode": "code_mode_only",
             "multi_agent_version": "v2",
-            "auto_compact_token_limit": 250000,
+            "auto_compact_token_limit": 1000000,
         }
     ],
 }
@@ -146,7 +146,7 @@ def configure_codex() -> tuple[Path, Path]:
         [
             f'model_provider = "{PROVIDER_NAME}"',
             f'model = "{MODEL_SLUG}"',
-            "model_context_window = 272000",
+            "model_context_window = 1050000",
             'approval_policy = "untrusted"',
             'sandbox_mode = "workspace-write"',
             "features = { memories = false }",

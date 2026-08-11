@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opencode-go-proxy-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxy
+  namespace: opencode-go-proxy-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opencode-go-proxy
+  template:
+    metadata:
+      labels:
+        app: opencode-go-proxy
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: localhost/opencode-go-proxy:dev-20260812-final
+          imagePullPolicy: Never
+          args: ["--bind", "0.0.0.0", "--port", "8787"]
+          env:
+            - name: OPENCODE_GO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: opencode-go-proxy-credentials
+                  key: upstream-api-key
+          ports:
+            - name: http
+              containerPort: 8787
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 24Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy
+  namespace: opencode-go-proxy-test
+spec:
+  type: NodePort
+  selector:
+    app: opencode-go-proxy
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
+      nodePort: 32095
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: proxy-network
+  namespace: opencode-go-proxy-test
+spec:
+  podSelector:
+    matchLabels:
+      app: opencode-go-proxy
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 192.168.36.0/24
+      ports:
+        - protocol: TCP
+          port: 8787
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

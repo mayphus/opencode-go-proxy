@@ -62,7 +62,7 @@ if ($Run) {
 }
 
 $uv = (Get-Command uv -ErrorAction Stop).Source
-& $uv sync --directory $RepoRoot
+& $uv sync --no-editable --reinstall-package opencode-go-proxy --directory $RepoRoot
 $python = Join-Path $RepoRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python)) {
     throw "Python executable was not created: $python"

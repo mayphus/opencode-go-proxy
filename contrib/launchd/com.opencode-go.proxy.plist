@@ -10,7 +10,7 @@
 		<string>/usr/bin/env</string>
 		<string>uvx</string>
 		<string>--from</string>
-		<string>git+https://github.com/kartikkabadi/opencode-go-proxy</string>
+		<string>git+https://github.com/zhengsanniu/opencode-go-proxy</string>
 		<string>opencode-go-proxy</string>
 		<string>--bind</string>
 		<string>127.0.0.1</string>

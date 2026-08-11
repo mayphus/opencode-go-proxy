@@ -19,15 +19,16 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/kartikkabadi/opencode-go-proxy"
-Repository = "https://github.com/kartikkabadi/opencode-go-proxy"
-Issues = "https://github.com/kartikkabadi/opencode-go-proxy/issues"
+Homepage = "https://github.com/zhengsanniu/opencode-go-proxy"
+Repository = "https://github.com/zhengsanniu/opencode-go-proxy"
+Issues = "https://github.com/zhengsanniu/opencode-go-proxy/issues"
 
 [project.scripts]
 opencode-go-proxy = "opencode_go_proxy.app:main"
+opencode-go-verify = "opencode_go_proxy.verify:main"
 
 [build-system]
-requires = ["uv_build>=0.10.9,<0.12.0"]
+requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]

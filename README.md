@@ -1,6 +1,6 @@
 # OpenCode Go Proxy
 
-[![CI](https://github.com/kartikkabadi/opencode-go-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/kartikkabadi/opencode-go-proxy/actions/workflows/ci.yml)
+[![CI](https://github.com/zhengsanniu/opencode-go-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/zhengsanniu/opencode-go-proxy/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Zero deps](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
@@ -33,7 +33,7 @@ natively — it requires Responses-shaped providers. This proxy fixes that.
 
 ```bash
 # Install and run
-uvx --from git+https://github.com/kartikkabadi/opencode-go-proxy \
+uvx --from git+https://github.com/zhengsanniu/opencode-go-proxy \
   opencode-go-proxy \
   --bind 127.0.0.1 \
   --port 8787
@@ -198,19 +198,42 @@ See the [lazycodex docs](https://github.com/code-yeongyu/oh-my-openagent) for se
 - SSRF protection on image URLs (`data:image/` and `https://` only)
 - Configurable body cap, bind address guard, keychain credential resolution
 - Local health and model-list endpoints
+- Native Luna server-side compaction before long chats reach the context limit
+- A live capability verifier for text, structured output, vision, search, and tool loops
+
+### Verify Luna capabilities
+
+Run the same end-to-end checks after an upgrade or deployment:
+
+```bash
+uv run --no-editable opencode-go-verify --base-url http://127.0.0.1:8787/v1
+```
+
+For the PB62 LAN test deployment (intentionally no client token):
+
+```bash
+uv run --no-editable opencode-go-verify --base-url http://pb62.local:32095/v1
+```
+
+Luna requests automatically ask the upstream Responses API to compact at 800,000 tokens.
+Override with `OPENCODE_GO_COMPACT_THRESHOLD`, or set it to `0` to disable. When a native
+compaction item returns in later history, the proxy safely drops only items before that
+canonical compacted state. OpenCode Go currently does not offer the separate
+`/responses/compact` endpoint, so the proxy reports that limitation instead of returning a
+normal response with the wrong shape.
 
 ## Install
 
 ### From source (no package manager)
 
 ```bash
-uvx --from git+https://github.com/kartikkabadi/opencode-go-proxy opencode-go-proxy --help
+uvx --from git+https://github.com/zhengsanniu/opencode-go-proxy opencode-go-proxy --help
 ```
 
 ### From a development checkout
 
 ```bash
-uv sync
+uv sync --no-editable --reinstall-package opencode-go-proxy
 uv run opencode-go-proxy --help
 ```
 
@@ -249,6 +272,35 @@ not only in the current terminal session. Logs are written to
 .\contrib\windows\opencode-go-proxy-task.ps1 -Uninstall
 ```
 
+### Windows notification-area app
+
+The zero-dependency tray app shows live status and provides Start, Stop, Open Logs, and
+Copy API URL actions. Its installer also installs the background proxy task:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\contrib\windows\opencode-go-proxy-tray.ps1 -Install
+```
+
+Double-click the tray icon to start or stop the proxy. `Exit Tray` leaves the background
+proxy running. To remove only the tray app:
+
+```powershell
+.\contrib\windows\opencode-go-proxy-tray.ps1 -Uninstall
+```
+
+### Container and Kubernetes
+
+The included `Containerfile` runs the stdlib-only proxy directly from source as an
+unprivileged user. `deploy/kubernetes.yaml` is a hardened single-replica example with
+health probes, resource limits, a LAN-scoped NetworkPolicy, and NodePort `32095`.
+
+Create `opencode-go-proxy-credentials` separately with the `upstream-api-key` key; never
+put its value in the manifest. The example is restricted to `192.168.36.0/24` by its
+NetworkPolicy and intentionally leaves client authentication disabled for local testing.
+For any wider network, also configure a separate random `client-token` and expose it as
+`OPENCODE_GO_PROXY_CLIENT_TOKEN`.
+
 ## Configuration
 
 All flags have environment variable defaults:
@@ -259,10 +311,15 @@ All flags have environment variable defaults:
 | `--port` | `OPENCODE_GO_PROXY_PORT` | `8787` |
 | `--chat-base-url` | `CHAT_COMPLETIONS_BASE_URL` | `https://opencode.ai/zen/go/v1` |
 | `--api-key-env` | `OPENCODE_GO_PROXY_API_KEY_ENV` | `OPENCODE_GO_API_KEY` |
+| `--client-token-env` | `OPENCODE_GO_PROXY_CLIENT_TOKEN_ENV` | `OPENCODE_GO_PROXY_CLIENT_TOKEN` |
 | `--timeout-sec` | `OPENCODE_GO_PROXY_TIMEOUT_SEC` | `180` |
 | `--max-body-mb` | `OPENCODE_GO_PROXY_MAX_BODY_MB` | `20` |
 
 The proxy accepts both `/responses` and `/v1/responses`.
+
+When `OPENCODE_GO_PROXY_CLIENT_TOKEN` is set, Responses HTTP and WebSocket requests must
+send that value as a bearer token. Health and model-list endpoints remain available for
+local probes. Leave it unset for the normal localhost-only setup.
 
 **One HTTP port only.** The proxy binds a single listener: `OPENCODE_GO_PROXY_PORT`
 (default `8787`). There is no admin port, control channel, or secondary service. If
@@ -349,7 +406,7 @@ You used `codex -m deepseek-v4-flash` instead of `codex -p deepseek-v4-flash`. T
 ## Development
 
 ```bash
-uv run python -m pytest tests -v
+uv run --no-sync python -m pytest tests -v
 uvx ruff check
 uv build
 ```

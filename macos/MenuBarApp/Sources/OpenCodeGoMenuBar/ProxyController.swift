@@ -57,7 +57,7 @@ final class ProxyController {
 
         let argv: [String] = [
             uvx,
-            "--from", "git+https://github.com/kartikkabadi/opencode-go-proxy",
+            "--from", "git+https://github.com/zhengsanniu/opencode-go-proxy",
             "opencode-go-proxy",
             "--bind", "127.0.0.1",
             "--port", "\(state.port)",

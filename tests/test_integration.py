@@ -21,6 +21,7 @@ def make_config(port: int) -> ProxyConfig:
         port=port,
         chat_base_url="https://mock-upstream.test/v1",
         api_key_env="OPENCODE_GO_API_KEY",
+        client_token_env="OPENCODE_GO_PROXY_CLIENT_TOKEN",
         timeout_sec=10,
         max_body_bytes=20 * 1024 * 1024,
     )
@@ -127,6 +128,62 @@ class TestHealthAndModels:
 
 
 class TestResponsesRoundTrip:
+    def test_client_token_is_optional_by_default(self, server):
+        port, _ = server
+        mock_resp = mock_chat_response("ok")
+
+        with mock.patch.dict(os.environ, {"OPENCODE_GO_API_KEY": "test-key"}, clear=True), mock.patch(
+            "urllib.request.urlopen", return_value=MockUpstreamResponse(json.dumps(mock_resp).encode())
+        ):
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request(
+                "POST",
+                "/v1/responses",
+                json.dumps({"model": "deepseek-v4-flash", "input": "hi"}),
+                {"content-type": "application/json"},
+            )
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+
+        assert resp.status == 200
+
+    def test_client_token_rejects_missing_or_wrong_bearer(self, server):
+        port, _ = server
+        with mock.patch.dict(os.environ, {"OPENCODE_GO_PROXY_CLIENT_TOKEN": "client-secret"}, clear=True):
+            for authorization in (None, "Bearer wrong"):
+                headers = {"content-type": "application/json"}
+                if authorization:
+                    headers["authorization"] = authorization
+                conn = HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request("POST", "/v1/responses", "{}", headers)
+                resp = conn.getresponse()
+                body = json.loads(resp.read())
+                conn.close()
+                assert resp.status == 401
+                assert body["error"]["type"] == "authentication_error"
+
+    def test_client_token_accepts_matching_bearer(self, server):
+        port, _ = server
+        mock_resp = mock_chat_response("ok")
+        with mock.patch.dict(
+            os.environ,
+            {"OPENCODE_GO_API_KEY": "test-key", "OPENCODE_GO_PROXY_CLIENT_TOKEN": "client-secret"},
+            clear=True,
+        ), mock.patch("urllib.request.urlopen", return_value=MockUpstreamResponse(json.dumps(mock_resp).encode())):
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request(
+                "POST",
+                "/v1/responses",
+                json.dumps({"model": "deepseek-v4-flash", "input": "hi"}),
+                {"content-type": "application/json", "authorization": "Bearer client-secret"},
+            )
+            resp = conn.getresponse()
+            resp.read()
+            conn.close()
+
+        assert resp.status == 200
+
     def test_non_streaming_response(self, server):
         port, _ = server
         mock_resp = mock_chat_response("hello world")
@@ -165,19 +222,17 @@ class TestResponsesRoundTrip:
 
     def test_responses_compact_path(self, server):
         port, _ = server
-        mock_resp = mock_chat_response("compact")
 
-        with mock.patch.dict(os.environ, {"OPENCODE_GO_API_KEY": "test-key"}), mock.patch("urllib.request.urlopen", return_value=MockUpstreamResponse(json.dumps(mock_resp).encode())):
-            conn = HTTPConnection("127.0.0.1", port, timeout=5)
-            conn.request("POST", "/responses/compact",
-                         json.dumps({"model": "deepseek-v4-flash", "input": "hi"}),
-                         {"content-type": "application/json"})
-            resp = conn.getresponse()
-            body = json.loads(resp.read())
-            conn.close()
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("POST", "/responses/compact",
+                     json.dumps({"model": "gpt-5.6-luna", "input": "hi"}),
+                     {"content-type": "application/json"})
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        conn.close()
 
-        assert resp.status == 200
-        assert body["status"] == "completed"
+        assert resp.status == 501
+        assert "server-side compaction automatically" in body["error"]["message"]
 
     def test_missing_api_key_returns_401(self, server):
         port, _ = server

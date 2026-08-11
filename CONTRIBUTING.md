@@ -3,16 +3,16 @@
 ## Setup
 
 ```bash
-git clone https://github.com/kartikkabadi/opencode-go-proxy.git
+git clone https://github.com/zhengsanniu/opencode-go-proxy.git
 cd opencode-go-proxy
-uv sync
+uv sync --no-editable --reinstall-package opencode-go-proxy
 ```
 
 ## Development
 
 ```bash
 # Run tests
-uv run python -m pytest tests -v
+uv run --no-sync python -m pytest tests -v
 
 # Lint
 uvx ruff check

@@ -23,6 +23,11 @@ class CodexConfigTests(unittest.TestCase):
         self.assertEqual([model["slug"] for model in catalog["models"]], [MODEL_SLUG])
         self.assertTrue(catalog["models"][0]["supports_search_tool"])
         self.assertEqual(catalog["models"][0]["input_modalities"], ["text", "image"])
+        self.assertEqual(catalog["models"][0]["context_window"], 1_050_000)
+        self.assertEqual(
+            [level["effort"] for level in catalog["models"][0]["supported_reasoning_levels"]],
+            ["none", "low", "medium", "high", "xhigh", "max"],
+        )
 
     def test_repeated_configuration_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"CODEX_HOME": directory}):

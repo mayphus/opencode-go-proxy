@@ -7,6 +7,10 @@
 - Native macOS menu bar app in `macos/MenuBarApp` (Swift/AppKit, SwiftPM): short status
   icon, live health check, start/stop of the proxy as a child process, open logs,
   reveal log file, copy port. Build with `swift build` in `macos/MenuBarApp` (macOS 13+).
+- Native Windows notification-area controller in `contrib/windows`, backed by the existing
+  crash-restarting scheduled task and using only built-in PowerShell/WinForms.
+- Minimal rootless `Containerfile` and hardened Kubernetes test manifest.
+- Optional client bearer-token authentication for non-localhost deployments.
 
 ### Changed
 
@@ -14,12 +18,10 @@
   default 8787) with no admin/control channel, how to verify what is listening
   (`lsof -nP -iTCP:8787 -sTCP:LISTEN`), and how to shorten the Codex provider label
   (edit `[model_providers.opencode-go] name` in `~/.codex/config.toml`).
-### Changed
-
-- README: document that the proxy exposes a single HTTP port (`OPENCODE_GO_PROXY_PORT`,
-  default 8787) with no admin/control channel, how to verify what is listening
-  (`lsof -nP -iTCP:8787 -sTCP:LISTEN`), and how to shorten the Codex provider label
-  (edit `[model_providers.opencode-go] name` in `~/.codex/config.toml`).
+- GPT 5.6 Luna keeps its native Responses transport for text, hosted web search, image input,
+  tools, streaming, and Desktop WebSocket sessions. Its catalog now advertises the official
+  1.05M context window and full reasoning-effort range.
+- Repository-owned install/service links now target `zhengsanniu/opencode-go-proxy`.
 
 ### Fixed
 
@@ -31,6 +33,18 @@
 - SIGTERM graceful shutdown: `serve_forever` now runs on a background thread so the signal
   handler's `server.shutdown()` no longer deadlocks on the main thread, leaving the process
   unkillable via SIGTERM (launchd/systemd stop, menu bar Stop).
+- Abrupt WebSocket disconnects no longer emit a server traceback.
+- Current `uv` builds use the matching build backend.
+- Desktop WebSocket sessions now operate statelessly for OpenCode Go: unsupported
+  `previous_response_id` state is removed, `store` is disabled, and supplied reasoning
+  items are replayed with the full history.
+- Empty Desktop WebSocket creates complete locally instead of producing upstream HTTP 400,
+  and successful upstream sessions emit an explicit completion trace.
+- Desktop `additional_tools` definitions are extracted on both HTTP streaming and WebSocket
+  transports and forwarded as native Responses tools, allowing Luna to invoke client-side
+  browser and other app tools.
+- Install and CI workflows use non-editable wheel installs to avoid malformed editable-path
+  files in affected `uv`/macOS combinations.
 
 ## [0.1.2] - 2026-06-21
 

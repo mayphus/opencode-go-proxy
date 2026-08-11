@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -48,6 +49,7 @@ class ProxyConfig:
         port: int,
         chat_base_url: str,
         api_key_env: str,
+        client_token_env: str,
         timeout_sec: float,
         max_body_bytes: int,
     ) -> None:
@@ -55,6 +57,7 @@ class ProxyConfig:
         self.port = port
         self.chat_base_url = chat_base_url.rstrip("/")
         self.api_key_env = api_key_env
+        self.client_token_env = client_token_env
         self.timeout_sec = timeout_sec
         self.max_body_bytes = max_body_bytes
 
@@ -71,6 +74,12 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path in {"/responses", "/v1/responses"} and self.headers.get("upgrade", "").lower() == "websocket":
             config: ProxyConfig = self.server.config  # type: ignore[attr-defined]
+            if not self._is_authorized(config):
+                self._send_json(
+                    {"error": {"message": "invalid client bearer token", "type": "authentication_error"}},
+                    status=HTTPStatus.UNAUTHORIZED,
+                )
+                return
             handle_websocket_responses(self, config)
             return
         if self.path in {"/health", "/v1/health"}:
@@ -86,14 +95,24 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         request_id = uuid.uuid4().hex[:12]
-        # /responses/compact is a standard Responses request; reuse the same handler.
         if self.path not in {"/responses", "/v1/responses", "/responses/compact", "/v1/responses/compact"}:
             self._send_json({"error": {"message": "not found"}}, status=HTTPStatus.NOT_FOUND)
             return
 
         try:
             config: ProxyConfig = self.server.config  # type: ignore[attr-defined]
+            if not self._is_authorized(config):
+                self._send_json(
+                    {"error": {"message": "invalid client bearer token", "type": "authentication_error"}},
+                    status=HTTPStatus.UNAUTHORIZED,
+                )
+                return
             payload = self._read_json(config)
+            if self.path in {"/responses/compact", "/v1/responses/compact"}:
+                raise ProxyError(
+                    HTTPStatus.NOT_IMPLEMENTED,
+                    "OpenCode Go does not expose /responses/compact; regular Luna requests use native server-side compaction automatically",
+                )
             trace(
                 "request.received",
                 request_id=request_id,
@@ -102,7 +121,17 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
                 stream=payload.get("stream", False),
             )
             if supports_native_responses(payload.get("model")):
+                payload = sanitize_websocket_payload(payload)
                 payload["model"] = normalize_model_slug(payload.get("model"))
+                input_value = payload.get("input")
+                trace(
+                    "request.native_payload",
+                    request_id=request_id,
+                    keys=sorted(payload),
+                    input_items=len(input_value) if isinstance(input_value, list) else None,
+                    input_types=_item_types(input_value),
+                    tool_types=_item_types(payload.get("tools")),
+                )
                 if payload.get("stream") is True:
                     self.send_response(HTTPStatus.OK)
                     self.send_header("content-type", "text/event-stream")
@@ -172,6 +201,19 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def _is_authorized(self, config: ProxyConfig) -> bool:
+        expected = os.environ.get(config.client_token_env)
+        if not expected:
+            return True
+        authorization = self.headers.get("authorization", "")
+        scheme, separator, supplied = authorization.partition(" ")
+        return bool(
+            separator
+            and scheme.lower() == "bearer"
+            and supplied
+            and hmac.compare_digest(supplied, expected)
+        )
 
 
 class ProxyError(Exception):
@@ -380,7 +422,6 @@ def _stream_native_response_events(
     upstream: PersistentUpstreamConnection | None = None,
 ) -> None:
     """Stream native Responses events from Go and pass decoded JSON to a transport."""
-    api_key = resolve_api_key(config, request_id)
     upstream_payload = sanitize_websocket_payload(payload)
     upstream_payload["model"] = normalize_model_slug(upstream_payload.get("model"))
     upstream_payload["stream"] = True
@@ -397,10 +438,18 @@ def _stream_native_response_events(
         tool_types=tool_types,
         input_items=len(input_value) if isinstance(input_value, list) else None,
     )
+    if isinstance(input_value, list) and not input_value:
+        _complete_empty_websocket_response(upstream_payload, request_id, on_event)
+        return
+
+    api_key = resolve_api_key(config, request_id)
     raw_payload = json.dumps(upstream_payload, separators=(",", ":")).encode("utf-8")
     if upstream is None:
         upstream = PersistentUpstreamConnection(config)
     trace("upstream.websocket.start", request_id=request_id, url=f"{config.chat_base_url}/responses", bytes=len(raw_payload))
+    started = time.time()
+    event_count = 0
+    final_status: str | None = None
     try:
         response = upstream.request(raw_payload, api_key, config)
         for line in response:
@@ -409,20 +458,62 @@ def _stream_native_response_events(
                 continue
             data = decoded[6:]
             if data == "[DONE]":
+                trace(
+                    "upstream.websocket.done",
+                    request_id=request_id,
+                    events=event_count,
+                    status=final_status,
+                    elapsed_ms=int((time.time() - started) * 1000),
+                )
                 return
             try:
                 event = json.loads(data)
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict):
+                event_count += 1
+                if event.get("type") == "response.completed":
+                    response_value = event.get("response")
+                    if isinstance(response_value, dict) and isinstance(response_value.get("status"), str):
+                        final_status = response_value["status"]
                 on_event(event)
+        trace(
+            "upstream.websocket.eof",
+            request_id=request_id,
+            events=event_count,
+            status=final_status,
+            elapsed_ms=int((time.time() - started) * 1000),
+        )
     except ProxyError as exc:
         trace("upstream.websocket.error", request_id=request_id, status=exc.status, body=exc.message[:4000])
         raise
 
 
+def _complete_empty_websocket_response(payload: Json, request_id: str, on_event: Any) -> None:
+    """Acknowledge Desktop warm-up creates without sending invalid empty input upstream."""
+    response_id = new_response_id()
+    model = normalize_model_slug(payload.get("model"))
+    created_at = now_unix()
+    in_progress: Json = {
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": "in_progress",
+        "model": model,
+        "output": [],
+        "output_text": "",
+        "usage": None,
+    }
+    on_event({"type": "response.created", "response": in_progress})
+    on_event({"type": "response.in_progress", "response": in_progress})
+    completed = dict(in_progress)
+    completed["status"] = "completed"
+    on_event({"type": "response.completed", "response": completed})
+    trace("websocket.empty_completed", request_id=request_id, model=model)
+
+
 def sanitize_websocket_payload(payload: Json) -> Json:
-    """Keep only portable Responses fields for the HTTP Go backend."""
+    """Keep portable stateless Responses fields for the HTTP Go backend."""
     allowed_keys = {
         "model",
         "input",
@@ -432,13 +523,35 @@ def sanitize_websocket_payload(payload: Json) -> Json:
         "max_output_tokens",
         "temperature",
         "top_p",
-        "previous_response_id",
         "store",
         "reasoning",
         "text",
         "parallel_tool_calls",
+        "stream",
+        # Verified against the OpenCode Go native Responses endpoint. Keep these
+        # fields native instead of silently weakening Desktop requests.
+        "background",
+        "context_management",
+        "max_tool_calls",
+        "metadata",
+        "safety_identifier",
+        "service_tier",
     }
     upstream_payload = {key: value for key, value in payload.items() if key in allowed_keys}
+    # OpenCode Go accepts stateless Responses but rejects persisted response state.
+    # Desktop already sends full history, so discard previous_response_id and replay
+    # its supplied items with store disabled.
+    upstream_payload["store"] = False
+    if "context_management" not in upstream_payload:
+        compact_threshold = _native_compact_threshold()
+        if compact_threshold:
+            upstream_payload["context_management"] = [
+                {"type": "compaction", "compact_threshold": compact_threshold}
+            ]
+    extracted_tools: list[object] = []
+    top_level_additional_tools = payload.get("additional_tools")
+    if isinstance(top_level_additional_tools, list):
+        extracted_tools.extend(top_level_additional_tools)
     input_items = upstream_payload.get("input")
     if isinstance(input_items, list):
         sanitized_items = []
@@ -448,17 +561,63 @@ def sanitize_websocket_payload(payload: Json) -> Json:
                 continue
             item_type = item.get("type")
             if item_type == "additional_tools":
-                continue
-            if item_type == "reasoning":
-                # The upstream response already owns prior reasoning state. Replaying
-                # encrypted reasoning blobs only increases prompt size and latency.
+                item_tools = item.get("tools")
+                if isinstance(item_tools, list):
+                    extracted_tools.extend(item_tools)
                 continue
             if item_type == "custom_tool_call_output":
                 item = dict(item)
                 item["type"] = "function_call_output"
             sanitized_items.append(item)
-        upstream_payload["input"] = sanitized_items
+        upstream_payload["input"] = _prune_before_latest_compaction(sanitized_items)
+    if extracted_tools:
+        existing_tools = upstream_payload.get("tools")
+        upstream_payload["tools"] = _dedupe_json_items([
+            *(existing_tools if isinstance(existing_tools, list) else []),
+            *extracted_tools,
+        ])
     return upstream_payload
+
+
+def _native_compact_threshold() -> int | None:
+    """Return the native compaction threshold, or None when explicitly disabled."""
+    raw = os.environ.get("OPENCODE_GO_COMPACT_THRESHOLD", "800000").strip()
+    if raw in {"", "0", "off", "false", "no"}:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ProxyError(HTTPStatus.INTERNAL_SERVER_ERROR, "OPENCODE_GO_COMPACT_THRESHOLD must be an integer") from exc
+    if value < 1000:
+        raise ProxyError(HTTPStatus.INTERNAL_SERVER_ERROR, "OPENCODE_GO_COMPACT_THRESHOLD must be at least 1000")
+    return value
+
+
+def _prune_before_latest_compaction(items: list[object]) -> list[object]:
+    """Keep the canonical compacted state and everything after it."""
+    latest = None
+    for index, item in enumerate(items):
+        if isinstance(item, dict) and item.get("type") == "compaction":
+            latest = index
+    return items[latest:] if latest is not None else items
+
+
+def _dedupe_json_items(items: list[object]) -> list[object]:
+    """Remove repeated Desktop tool definitions while preserving their order."""
+    result: list[object] = []
+    seen: set[str] = set()
+    for item in items:
+        marker = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str)
+        if marker not in seen:
+            seen.add(marker)
+            result.append(item)
+    return result
+
+
+def _item_types(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return sorted({str(item.get("type", "<missing>")) for item in value if isinstance(item, dict)})
 
 
 def handle_websocket_responses(handler: ResponsesProxyHandler, config: ProxyConfig) -> None:
@@ -477,7 +636,11 @@ def handle_websocket_responses(handler: ResponsesProxyHandler, config: ProxyConf
 
     try:
         while True:
-            frame = _read_ws_frame(handler.rfile)
+            try:
+                frame = _read_ws_frame(handler.rfile)
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                trace("websocket.disconnected", path=handler.path)
+                return
             if frame is None:
                 return
             opcode, payload = frame
@@ -933,6 +1096,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("CHAT_COMPLETIONS_BASE_URL", "https://opencode.ai/zen/go/v1"),
     )
     parser.add_argument("--api-key-env", default=os.environ.get("OPENCODE_GO_PROXY_API_KEY_ENV", "OPENCODE_GO_API_KEY"))
+    parser.add_argument(
+        "--client-token-env",
+        default=os.environ.get("OPENCODE_GO_PROXY_CLIENT_TOKEN_ENV", "OPENCODE_GO_PROXY_CLIENT_TOKEN"),
+        help="environment variable containing an optional bearer token required from clients",
+    )
     parser.add_argument("--timeout-sec", type=float, default=float(os.environ.get("OPENCODE_GO_PROXY_TIMEOUT_SEC", "180")))
     parser.add_argument("--max-body-mb", type=int, default=int(os.environ.get("OPENCODE_GO_PROXY_MAX_BODY_MB", "20")))
     parser.add_argument(
@@ -955,6 +1123,7 @@ def main(argv: list[str] | None = None) -> None:
         port=args.port,
         chat_base_url=args.chat_base_url,
         api_key_env=args.api_key_env,
+        client_token_env=args.client_token_env,
         timeout_sec=args.timeout_sec,
         max_body_bytes=args.max_body_mb * 1024 * 1024,
     )

@@ -18,6 +18,11 @@ The proxy emits a `security.warning` trace when bound to a non-localhost address
 Codex should talk to the local `/v1/responses` endpoint, and the proxy should
 be the only process that talks to the upstream API with the real provider key.
 
+For LAN or cluster deployments, set `OPENCODE_GO_PROXY_CLIENT_TOKEN` to a separate
+random value. Responses HTTP and WebSocket clients must then send that value as a
+bearer token. Never reuse or distribute the upstream OpenCode API key as the client
+token. Keep a network policy or firewall in place as a second boundary.
+
 ## SSRF protection
 
 Image URLs in conversation content are validated — only `data:image/` and
