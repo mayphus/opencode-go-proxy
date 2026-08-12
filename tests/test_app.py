@@ -317,9 +317,23 @@ class WebSocketResponsesTests(unittest.TestCase):
             "metadata",
             "safety_identifier",
             "service_tier",
+            "prompt_cache_options",
         ):
             self.assertEqual(result[key], payload[key])
-        self.assertNotIn("prompt_cache_options", result)
+        self.assertEqual(result["reasoning"], {"context": "all_turns"})
+
+    def test_sanitizer_adds_all_turns_without_overwriting_reasoning_effort(self) -> None:
+        result = sanitize_websocket_payload({
+            "model": "gpt-5.6-luna",
+            "input": "hello",
+            "reasoning": {"effort": "high", "mode": "pro"},
+        })
+
+        self.assertEqual(result["reasoning"], {
+            "effort": "high",
+            "mode": "pro",
+            "context": "all_turns",
+        })
 
     def test_sanitizer_prunes_history_before_latest_native_compaction(self) -> None:
         result = sanitize_websocket_payload({

@@ -22,6 +22,8 @@ class CodexConfigTests(unittest.TestCase):
         self.assertEqual(config["model_catalog_json"], str(catalog_path))
         self.assertEqual([model["slug"] for model in catalog["models"]], [MODEL_SLUG])
         self.assertTrue(catalog["models"][0]["supports_search_tool"])
+        self.assertTrue(catalog["models"][0]["support_verbosity"])
+        self.assertTrue(catalog["models"][0]["include_skills_usage_instructions"])
         self.assertEqual(catalog["models"][0]["input_modalities"], ["text", "image"])
         self.assertEqual(catalog["models"][0]["context_window"], 1_050_000)
         self.assertEqual(

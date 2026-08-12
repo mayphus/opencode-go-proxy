@@ -10,11 +10,47 @@ import sys
 import urllib.error
 import urllib.request
 import zlib
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import Any, Callable
-
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 Json = dict[str, Any]
+
+CAPABILITY_CHECKS = {
+    "text": "text",
+    "structured_output": "structured_output",
+    "vision": "image",
+    "web_search": "web_search",
+    "function_tools": "function_tools",
+    "custom_tools": "custom_tools",
+    "stateless_reasoning": "persisted_reasoning",
+    "prompt_cache_options": "prompt_caching",
+}
+NATIVE_CAPABILITIES = (
+    "text",
+    "structured_output",
+    "image",
+    "web_search",
+    "function_tools",
+    "custom_tools",
+    "file_search",
+    "computer_use",
+    "code_interpreter",
+    "image_generation",
+    "mcp",
+    "tool_search",
+    "hosted_shell",
+    "skills",
+    "programmatic_tool_calling",
+    "multi_agent",
+    "pro_mode",
+    "prompt_caching",
+    "persisted_reasoning",
+    "background",
+    "compaction",
+)
 
 def _png_chunk(kind: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", binascii.crc32(kind + data) & 0xFFFFFFFF)
@@ -62,7 +98,7 @@ class ResponsesClient:
             body = exc.read().decode(errors="replace")
             raise RuntimeError(f"HTTP {exc.code}: {body[:300]}") from exc
         if not isinstance(value, dict):
-            raise RuntimeError("response was not a JSON object")
+            raise TypeError("response was not a JSON object")
         return value
 
 
@@ -105,7 +141,11 @@ def _run(name: str, check: Callable[[], str]) -> CheckResult:
         return CheckResult(name, False, str(exc))
 
 
-def run_verification(client: ResponsesClient, model: str) -> list[CheckResult]:
+def run_verification(
+    client: ResponsesClient,
+    model: str,
+    selected: set[str] | None = None,
+) -> list[CheckResult]:
     def text_check() -> str:
         response = client.create({"model": model, "input": "Reply with exactly: verification-ok", "store": False})
         if output_text(response).strip().lower() != "verification-ok":
@@ -184,6 +224,28 @@ def run_verification(client: ResponsesClient, model: str) -> list[CheckResult]:
             raise AssertionError(f"custom tool result was not consumed: {output_text(second)!r}")
         return "custom app-tool round trip"
 
+    def stateless_reasoning_check() -> str:
+        response = client.create({
+            "model": model,
+            "input": "Reply with exactly: reasoning-context-ok",
+            "store": False,
+            "reasoning": {"effort": "low", "context": "all_turns"},
+        })
+        if output_text(response).strip().lower() != "reasoning-context-ok":
+            raise AssertionError(f"unexpected reasoning response: {output_text(response)!r}")
+        return "store=false with reasoning.context=all_turns"
+
+    def prompt_cache_check() -> str:
+        response = client.create({
+            "model": model,
+            "input": "Reply with exactly: prompt-cache-ok",
+            "store": False,
+            "prompt_cache_options": {"mode": "implicit"},
+        })
+        if output_text(response).strip().lower() != "prompt-cache-ok":
+            raise AssertionError(f"unexpected prompt-cache response: {output_text(response)!r}")
+        return "prompt_cache_options accepted"
+
     checks = [
         ("text", text_check),
         ("structured_output", structured_check),
@@ -191,8 +253,31 @@ def run_verification(client: ResponsesClient, model: str) -> list[CheckResult]:
         ("web_search", search_check),
         ("function_tools", function_check),
         ("custom_tools", custom_check),
+        ("stateless_reasoning", stateless_reasoning_check),
+        ("prompt_cache_options", prompt_cache_check),
     ]
-    return [_run(name, check) for name, check in checks]
+    return [_run(name, check) for name, check in checks if selected is None or name in selected]
+
+
+def verification_report(model: str, results: list[CheckResult]) -> Json:
+    capabilities: Json = {
+        capability: {"status": "untested", "detail": "No live evidence recorded."}
+        for capability in NATIVE_CAPABILITIES
+    }
+    for result in results:
+        capability = CAPABILITY_CHECKS[result.name]
+        capabilities[capability] = {
+            "status": "verified" if result.passed else "rejected",
+            "detail": result.detail,
+        }
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "model": model,
+        "passed": all(item.passed for item in results),
+        "checks": [asdict(item) for item in results],
+        "capabilities": capabilities,
+    }
 
 
 def main() -> None:
@@ -201,12 +286,38 @@ def main() -> None:
     parser.add_argument("--client-token", default=os.environ.get("OPENCODE_GO_PROXY_CLIENT_TOKEN"))
     parser.add_argument("--model", default="gpt-5.6-luna")
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument(
+        "--checks",
+        help="Comma-separated checks to run; use --list-checks to see names.",
+    )
+    parser.add_argument("--list-checks", action="store_true")
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=Path(os.environ["OPENCODE_CAPABILITY_REPORT"]) if os.environ.get("OPENCODE_CAPABILITY_REPORT") else None,
+        help="Write a dashboard-compatible JSON evidence report.",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args()
 
-    results = run_verification(ResponsesClient(args.base_url, args.client_token, args.timeout), args.model)
+    if args.list_checks:
+        print("\n".join(CAPABILITY_CHECKS))
+        return
+    selected = {item.strip() for item in args.checks.split(",") if item.strip()} if args.checks else None
+    unknown = (selected or set()) - set(CAPABILITY_CHECKS)
+    if unknown:
+        parser.error(f"unknown checks: {', '.join(sorted(unknown))}")
+    results = run_verification(
+        ResponsesClient(args.base_url, args.client_token, args.timeout),
+        args.model,
+        selected,
+    )
+    report = verification_report(args.model, results)
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     if args.as_json:
-        print(json.dumps({"passed": all(item.passed for item in results), "checks": [asdict(item) for item in results]}, indent=2))
+        print(json.dumps(report, indent=2))
     else:
         for item in results:
             print(f"{'PASS' if item.passed else 'FAIL'}  {item.name}: {item.detail}")

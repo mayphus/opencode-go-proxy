@@ -137,6 +137,39 @@ class TestHealthAndModels:
         assert "gpt-5.6-luna" in routing["native_models"]
         assert "web_search" in routing["capability_models"]["gpt-5.6-luna"]
 
+    def test_dashboard_reads_local_capability_evidence_without_model_call(self, server, tmp_path):
+        port, _ = server
+        report_path = tmp_path / "capabilities.json"
+        report_path.write_text(json.dumps({
+            "schema_version": 1,
+            "generated_at": "2026-08-12T00:00:00+00:00",
+            "model": "gpt-5.6-luna",
+            "capabilities": {
+                "web_search": {"status": "verified", "detail": "citation observed"},
+                "file_search": {"status": "untested", "detail": "No live evidence recorded."},
+            },
+        }))
+        peers = json.dumps([{
+            "name": "Local test",
+            "upstream": "Go",
+            "probe_url": f"http://127.0.0.1:{port}/v1",
+            "public_url": "http://example.test/v1",
+        }])
+        with mock.patch.dict(os.environ, {
+            "OPENCODE_DASHBOARD_PEERS": peers,
+            "OPENCODE_CAPABILITY_REPORT": str(report_path),
+        }, clear=True):
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/dashboard.json")
+            resp = conn.getresponse()
+            body = json.loads(resp.read())
+            conn.close()
+
+        evidence = body["services"][0]["routing"]["verification"]["gpt-5.6-luna"]
+        assert resp.status == 200
+        assert evidence["web_search"]["status"] == "verified"
+        assert evidence["file_search"]["status"] == "untested"
+
     def test_dashboard_assets_are_same_origin(self, server):
         port, _ = server
         for path, content_type in (("/dashboard.css", "text/css"), ("/dashboard.js", "text/javascript")):

@@ -261,10 +261,17 @@ See the [lazycodex docs](https://github.com/code-yeongyu/oh-my-openagent) for se
 - Native Luna server-side compaction before long chats reach the context limit
 - Automatic native Luna web search when Desktop omits the hosted search tool
 - A live capability verifier for text, structured output, vision, search, and tool loops
+- Dashboard capability evidence from verifier reports, clearly separated into verified,
+  rejected, and untested states
 
 Luna always receives its native `web_search` tool unless the client already supplied
 `web_search` or `web_search_preview`. Browser tools remain available for interactive browsing.
 Set `OPENCODE_GO_NATIVE_SEARCH=0` to disable automatic native search injection.
+
+Codex Desktop remains stateless: the proxy sends `store = false`, preserves encrypted reasoning
+items supplied in history, and defaults Luna to `reasoning.context = "all_turns"`. Native
+`prompt_cache_options` are preserved. The generated Luna catalog also enables verbosity controls
+and automatic skill usage instructions.
 
 ### Verify Luna capabilities
 
@@ -273,6 +280,20 @@ Run the same end-to-end checks after an upgrade or deployment:
 ```bash
 uv run --no-editable opencode-go-verify --base-url http://127.0.0.1:8787/v1
 ```
+
+To save live evidence for the dashboard, point both processes at the same report path:
+
+```bash
+export OPENCODE_CAPABILITY_REPORT="$PWD/capabilities.json"
+uv run --no-editable opencode-go-verify \
+  --base-url http://127.0.0.1:8787/v1 \
+  --report "$OPENCODE_CAPABILITY_REPORT"
+```
+
+The verifier records evidence only for checks it actually runs; other native capabilities remain
+`untested`. Use `opencode-go-verify --list-checks` or `--checks text,web_search` to select probes.
+Verifier runs send model requests and can consume upstream allowance; the dashboard itself never
+calls a model.
 
 For the PB62 LAN test deployment (intentionally no client token):
 

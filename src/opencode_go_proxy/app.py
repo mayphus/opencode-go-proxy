@@ -427,6 +427,25 @@ def route_combined_payload(payload: Json, config: ProxyConfig) -> tuple[Json, Pr
     return routed, config.for_upstream(product), product
 
 
+def load_capability_report() -> Json | None:
+    """Read optional live-verification evidence without calling a model."""
+    report_path = os.environ.get("OPENCODE_CAPABILITY_REPORT", "").strip()
+    if not report_path:
+        return None
+    try:
+        if os.path.getsize(report_path) > 1024 * 1024:
+            return None
+        with open(report_path, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(report, dict) or report.get("schema_version") != 1:
+        return None
+    if not isinstance(report.get("model"), str) or not isinstance(report.get("capabilities"), dict):
+        return None
+    return report
+
+
 def dashboard_payload(config: ProxyConfig, host: str) -> Json:
     """Return read-only service status; probes only health/model-list endpoints."""
     upstream = "Combined" if _is_combined_upstream(config) else "Zen" if _is_zen_upstream(config) else "Go"
@@ -444,6 +463,7 @@ def dashboard_payload(config: ProxyConfig, host: str) -> Json:
     if not isinstance(peers, list):
         peers = [default_peer]
 
+    capability_report = load_capability_report()
     services: list[Json] = []
     for candidate in peers[:8]:
         if not isinstance(candidate, dict):
@@ -504,6 +524,12 @@ def dashboard_payload(config: ProxyConfig, host: str) -> Json:
                         "zen": f'zen/{os.environ.get("OPENCODE_ZEN_CAPABILITY_MODEL", CAPABILITY_MODEL_DEFAULT)}',
                     } if peer_upstream == "combined" else {},
                     "vision_bridge_models": {},
+                    "verification": {
+                        capability_report["model"]: capability_report["capabilities"]
+                    } if capability_report and capability_report["model"] in models else {},
+                    "verification_generated_at": (
+                        capability_report.get("generated_at") if capability_report else None
+                    ),
                 },
             })
         except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError):
@@ -825,12 +851,18 @@ def sanitize_websocket_payload(payload: Json) -> Json:
         "metadata",
         "safety_identifier",
         "service_tier",
+        "prompt_cache_options",
     }
     upstream_payload = {key: value for key, value in payload.items() if key in allowed_keys}
     # OpenCode Go accepts stateless Responses but rejects persisted response state.
     # Desktop already sends full history, so discard previous_response_id and replay
     # its supplied items with store disabled.
     upstream_payload["store"] = False
+    reasoning = upstream_payload.get("reasoning")
+    if reasoning is None:
+        upstream_payload["reasoning"] = {"context": "all_turns"}
+    elif isinstance(reasoning, dict) and "context" not in reasoning:
+        upstream_payload["reasoning"] = {**reasoning, "context": "all_turns"}
     if "compaction" in model_capabilities(upstream_payload.get("model")) and "context_management" not in upstream_payload:
         compact_threshold = _native_compact_threshold()
         if compact_threshold:

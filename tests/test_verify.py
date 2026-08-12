@@ -1,6 +1,13 @@
 import json
 
-from opencode_go_proxy.verify import has_url_citation, output_items, output_text, red_png
+from opencode_go_proxy.verify import (
+    CheckResult,
+    has_url_citation,
+    output_items,
+    output_text,
+    red_png,
+    verification_report,
+)
 
 
 def test_generated_red_png_is_true_color_32_by_32():
@@ -30,3 +37,15 @@ def test_url_citation_detection():
     }''')
 
     assert has_url_citation(response)
+
+
+def test_verification_report_distinguishes_evidence_states():
+    report = verification_report("go/gpt-5.6-luna", [
+        CheckResult("web_search", True, "citation observed"),
+        CheckResult("prompt_cache_options", False, "HTTP 400"),
+    ])
+
+    assert report["model"] == "go/gpt-5.6-luna"
+    assert report["capabilities"]["web_search"]["status"] == "verified"
+    assert report["capabilities"]["prompt_caching"]["status"] == "rejected"
+    assert report["capabilities"]["file_search"]["status"] == "untested"

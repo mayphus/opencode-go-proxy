@@ -4,6 +4,8 @@
 
 ### Added
 
+- Capability evidence reports for the token-free dashboard, with verified, rejected, and
+  untested states from opt-in live verifier runs.
 - Zero-dependency read-only web dashboard for Go/Zen health, model discovery, capability routing,
   and copyable Desktop setup; its probes use only `/health` and `/models` and spend no tokens.
 - Combined Go + Zen mode with one provider, one port, explicit `go/` and `zen/` model prefixes,
@@ -24,6 +26,8 @@
 
 ### Changed
 
+- Luna Desktop requests now preserve `prompt_cache_options`, use stateless
+  `reasoning.context = "all_turns"`, and advertise verbosity and automatic skill instructions.
 - PB62 now exposes one combined service on NodePort `32096` instead of separate Go/Zen ports.
 - README: document that the proxy exposes a single HTTP port (`OPENCODE_GO_PROXY_PORT`,
   default 8787) with no admin/control channel, how to verify what is listening
