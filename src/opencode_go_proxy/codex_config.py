@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from .protocol import ZEN_MODELS, ZEN_RESPONSES_MODELS
+from .protocol import GO_MODELS, ZEN_MODELS, ZEN_RESPONSES_MODELS
 
 MODEL_SLUG = "gpt-5.6-luna"
 PROVIDER_NAME = "opencode-go"
@@ -98,6 +98,33 @@ def _zen_catalog() -> dict[str, Any]:
     }
 
 
+def _combined_catalog() -> dict[str, Any]:
+    template = CATALOG["models"][0]
+    entries: list[dict[str, Any]] = []
+    pairs = [("go", slug) for slug in sorted(GO_MODELS)] + [("zen", slug) for slug in sorted(ZEN_MODELS)]
+    for priority, (product, slug) in enumerate(pairs):
+        model = deepcopy(template)
+        model.update({
+            "slug": f"{product}/{slug}",
+            "display_name": f"{product.title()} · {slug.replace('-', ' ').title().replace('Gpt', 'GPT').replace('Glm', 'GLM')}",
+            "description": f"OpenCode {product.title()} model with same-product capability fallback.",
+            "priority": 200 - priority,
+            "use_responses_lite": slug == MODEL_SLUG if product == "go" else slug in ZEN_RESPONSES_MODELS,
+        })
+        if not slug.startswith("gpt-5.6-"):
+            model["context_window"] = 128000
+            model["max_context_window"] = 128000
+            model["auto_compact_token_limit"] = 110000
+            model["model_messages"]["token_budget"]["auto_compact_token_limit"] = 110000
+        entries.append(model)
+    return {
+        "fetched_at": "2026-08-12T00:00:00.000000Z",
+        "etag": 'W/"opencode-combined-prefixed-v1"',
+        "client_version": CATALOG["client_version"],
+        "models": entries,
+    }
+
+
 def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
 
@@ -146,13 +173,24 @@ def _ensure_top_level_key(lines: list[str], key: str, value: str) -> None:
 
 def configure_codex(upstream: str = "go") -> tuple[Path, Path]:
     """Create an OpenCode provider/profile and selector catalog idempotently."""
-    if upstream not in {"go", "zen"}:
-        raise ValueError("upstream must be 'go' or 'zen'")
-    provider_name = "opencode-zen" if upstream == "zen" else PROVIDER_NAME
-    provider_display_name = "OpenCode Zen" if upstream == "zen" else "OpenCode Go"
-    catalog_filename = "opencode-zen.json" if upstream == "zen" else CATALOG_FILENAME
-    catalog = _zen_catalog() if upstream == "zen" else CATALOG
-    profile_name = f"{MODEL_SLUG}-zen" if upstream == "zen" else MODEL_SLUG
+    if upstream not in {"go", "zen", "combined"}:
+        raise ValueError("upstream must be 'go', 'zen', or 'combined'")
+    if upstream == "combined":
+        provider_name = "opencode"
+        provider_display_name = "OpenCode"
+        catalog_filename = "opencode.json"
+        catalog = _combined_catalog()
+        profiles = [
+            ("luna-go", f"go/{MODEL_SLUG}"),
+            ("luna-zen", f"zen/{MODEL_SLUG}"),
+            ("deepseek-zen", "zen/deepseek-v4-flash-free"),
+        ]
+    else:
+        provider_name = "opencode-zen" if upstream == "zen" else PROVIDER_NAME
+        provider_display_name = "OpenCode Zen" if upstream == "zen" else "OpenCode Go"
+        catalog_filename = "opencode-zen.json" if upstream == "zen" else CATALOG_FILENAME
+        catalog = _zen_catalog() if upstream == "zen" else CATALOG
+        profiles = [(f"{MODEL_SLUG}-zen" if upstream == "zen" else MODEL_SLUG, MODEL_SLUG)]
     codex_home = _codex_home()
     codex_home.mkdir(parents=True, exist_ok=True)
     config_path = codex_home / "config.toml"
@@ -171,23 +209,24 @@ def configure_codex(upstream: str = "go") -> tuple[Path, Path]:
             'wire_api = "responses"',
         ],
     )
-    profile_section = f'profiles."{profile_name}"'
-    legacy_profile_section = f"profiles.{profile_name}"
-    legacy_bounds = _section_bounds(lines, legacy_profile_section)
-    if legacy_bounds is not None and _section_bounds(lines, profile_section) is None:
-        lines[legacy_bounds[0]] = f"[{profile_section}]"
-    _ensure_section(
-        lines,
-        profile_section,
-        [
-            f'model_provider = "{provider_name}"',
-            f'model = "{MODEL_SLUG}"',
-            "model_context_window = 1050000",
-            'approval_policy = "untrusted"',
-            'sandbox_mode = "workspace-write"',
-            "features = { memories = false }",
-        ],
-    )
+    for profile_name, profile_model in profiles:
+        profile_section = f'profiles."{profile_name}"'
+        legacy_profile_section = f"profiles.{profile_name}"
+        legacy_bounds = _section_bounds(lines, legacy_profile_section)
+        if legacy_bounds is not None and _section_bounds(lines, profile_section) is None:
+            lines[legacy_bounds[0]] = f"[{profile_section}]"
+        _ensure_section(
+            lines,
+            profile_section,
+            [
+                f'model_provider = "{provider_name}"',
+                f'model = "{profile_model}"',
+                f'model_context_window = {1050000 if profile_model.endswith(MODEL_SLUG) else 128000}',
+                'approval_policy = "untrusted"',
+                'sandbox_mode = "workspace-write"',
+                "features = { memories = false }",
+            ],
+        )
     config_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     catalog_path.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
     return config_path, catalog_path

@@ -56,6 +56,22 @@ class CodexConfigTests(unittest.TestCase):
         self.assertFalse(deepseek["use_responses_lite"])
         self.assertTrue(deepseek["supports_search_tool"])
 
+    def test_configures_one_combined_provider_with_prefixed_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"CODEX_HOME": directory}):
+            config_path, catalog_path = configure_codex("combined")
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(config["model_providers"]["opencode"]["wire_api"], "responses")
+        self.assertEqual(config["profiles"]["luna-go"]["model"], "go/gpt-5.6-luna")
+        self.assertEqual(config["profiles"]["luna-zen"]["model"], "zen/gpt-5.6-luna")
+        self.assertEqual(config["profiles"]["deepseek-zen"]["model"], "zen/deepseek-v4-flash-free")
+        slugs = {model["slug"] for model in catalog["models"]}
+        self.assertIn("go/gpt-5.6-luna", slugs)
+        self.assertIn("zen/gpt-5.6-luna", slugs)
+        self.assertIn("zen/deepseek-v4-flash-free", slugs)
+        self.assertNotIn("gpt-5.6-luna", slugs)
+
     def test_existing_config_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"CODEX_HOME": directory}):
             codex_home = Path(directory)

@@ -27,24 +27,28 @@ from .codex_config import configure_codex
 from .dashboard import DASHBOARD_CSS, DASHBOARD_HTML, DASHBOARD_JS
 from .protocol import (
     CAPABILITY_MODEL_DEFAULT,
+    COMBINED_MODELS,
     DEFAULT_MODEL,
     IMAGE_MODEL_DEFAULT,
     KNOWN_MODELS,
-    chat_completion_to_response,
-    chat_message_to_response_output,
-    new_response_id,
-    normalize_model_slug,
-    normalize_zen_model_slug,
-    normalize_usage,
-    model_capabilities,
-    required_capabilities,
-    now_unix,
-    responses_payload_to_chat_payload,
     ZEN_MODELS,
     ZEN_RESPONSES_MODELS,
+    chat_completion_to_response,
+    chat_message_to_response_output,
+    model_capabilities,
+    new_response_id,
+    normalize_model_slug,
+    normalize_usage,
+    normalize_zen_model_slug,
+    now_unix,
+    required_capabilities,
+    responses_payload_to_chat_payload,
+    split_combined_model_slug,
 )
 
 Json = dict[str, Any]
+GO_BASE_URL = "https://opencode.ai/zen/go/v1"
+ZEN_BASE_URL = "https://opencode.ai/zen/v1"
 
 
 class ProxyConfig:
@@ -58,6 +62,9 @@ class ProxyConfig:
         client_token_env: str,
         timeout_sec: float,
         max_body_bytes: int,
+        upstream: str | None = None,
+        routed_from_combined: bool = False,
+        model_prefix: str | None = None,
     ) -> None:
         self.bind = bind
         self.port = port
@@ -66,6 +73,33 @@ class ProxyConfig:
         self.client_token_env = client_token_env
         self.timeout_sec = timeout_sec
         self.max_body_bytes = max_body_bytes
+        self.upstream = upstream or ("zen" if "/zen/v1" in self.chat_base_url and "/zen/go/v1" not in self.chat_base_url else "go")
+        self.routed_from_combined = routed_from_combined
+        self.model_prefix = model_prefix
+
+    def for_upstream(self, upstream: str) -> ProxyConfig:
+        base_url = (
+            os.environ.get("OPENCODE_ZEN_BASE_URL", ZEN_BASE_URL)
+            if upstream == "zen"
+            else os.environ.get("OPENCODE_GO_BASE_URL", GO_BASE_URL)
+        )
+        return ProxyConfig(
+            bind=self.bind,
+            port=self.port,
+            chat_base_url=base_url,
+            api_key_env=self.api_key_env,
+            client_token_env=self.client_token_env,
+            timeout_sec=self.timeout_sec,
+            max_body_bytes=self.max_body_bytes,
+            upstream=upstream,
+            routed_from_combined=True,
+            model_prefix=upstream,
+        )
+
+    def external_model(self, model: Any) -> Any:
+        if self.model_prefix and isinstance(model, str) and not model.startswith(f"{self.model_prefix}/"):
+            return f"{self.model_prefix}/{model}"
+        return model
 
 
 def trace(event: str, **fields: Any) -> None:
@@ -106,7 +140,11 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
             return
         if self.path in {"/models", "/v1/models"}:
             config: ProxyConfig = self.server.config  # type: ignore[attr-defined]
-            models = ZEN_MODELS if _is_zen_upstream(config) else KNOWN_MODELS
+            models = (
+                COMBINED_MODELS
+                if _is_combined_upstream(config)
+                else ZEN_MODELS if _is_zen_upstream(config) else KNOWN_MODELS
+            )
             self._send_json({
                 "object": "list",
                 "data": [{"id": slug, "object": "model"} for slug in sorted(models)],
@@ -134,12 +172,14 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
                     HTTPStatus.NOT_IMPLEMENTED,
                     "OpenCode Go does not expose /responses/compact; regular Luna requests use native server-side compaction automatically",
                 )
+            payload, config, product = route_combined_payload(payload, config)
             trace(
                 "request.received",
                 request_id=request_id,
                 path=self.path,
                 model=payload.get("model"),
                 stream=payload.get("stream", False),
+                upstream=product or config.upstream,
             )
             native_model, fallback_capabilities = select_native_model(payload, config)
             if native_model is not None:
@@ -176,7 +216,7 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     handle_native_responses_stream(payload, config, request_id, self.wfile)
                 else:
-                    self._send_json(call_upstream_responses(payload, config, request_id))
+                    self._send_json(externalize_response(call_upstream_responses(payload, config, request_id), config))
                 return
             if payload.get("stream") is True:
                 # Real streaming: send SSE headers, then stream from upstream in real-time.
@@ -321,7 +361,9 @@ class PersistentUpstreamConnection:
 
 
 def handle_responses_request(payload: Json, config: ProxyConfig, request_id: str) -> Json:
-    chat_payload, request_model, conversion_stats = responses_payload_to_chat_payload(payload)
+    chat_payload, request_model, conversion_stats = responses_payload_to_chat_payload(
+        payload, zen=_is_zen_upstream(config)
+    )
 
     # Split-turn: if image + tools, caption images via MiMo sub-call, then route to the requested model.
     # MiMo can't drive tool loops from tool-role image messages; caption + requested model keeps the agent loop alive.
@@ -344,16 +386,50 @@ def handle_responses_request(payload: Json, config: ProxyConfig, request_id: str
         output_text_len=len(response.get("output_text", "")),
         usage=response.get("usage"),
     )
-    return response
+    return externalize_response(response, config)
+
+
+def externalize_response(value: Json, config: ProxyConfig) -> Json:
+    """Restore a combined model prefix in Responses objects and events."""
+    if not config.model_prefix:
+        return value
+    result = dict(value)
+    if isinstance(result.get("model"), str):
+        result["model"] = config.external_model(result["model"])
+    nested = result.get("response")
+    if isinstance(nested, dict):
+        result["response"] = externalize_response(nested, config)
+    return result
 
 
 def _is_zen_upstream(config: ProxyConfig) -> bool:
-    return "/zen/v1" in config.chat_base_url and "/zen/go/v1" not in config.chat_base_url
+    return config.upstream == "zen" or (
+        config.upstream != "combined"
+        and "/zen/v1" in config.chat_base_url
+        and "/zen/go/v1" not in config.chat_base_url
+    )
+
+
+def _is_combined_upstream(config: ProxyConfig) -> bool:
+    return config.upstream == "combined"
+
+
+def route_combined_payload(payload: Json, config: ProxyConfig) -> tuple[Json, ProxyConfig, str | None]:
+    """Route a prefixed model to its product without inferring billing intent."""
+    if not _is_combined_upstream(config):
+        return payload, config, None
+    split = split_combined_model_slug(payload.get("model"))
+    if split is None:
+        raise ProxyError(HTTPStatus.BAD_REQUEST, "combined mode requires a valid go/<model> or zen/<model> model id")
+    product, model = split
+    routed = dict(payload)
+    routed["model"] = model
+    return routed, config.for_upstream(product), product
 
 
 def dashboard_payload(config: ProxyConfig, host: str) -> Json:
     """Return read-only service status; probes only health/model-list endpoints."""
-    upstream = "Zen" if _is_zen_upstream(config) else "Go"
+    upstream = "Combined" if _is_combined_upstream(config) else "Zen" if _is_zen_upstream(config) else "Go"
     default_peer = {
         "name": f"OpenCode {upstream}",
         "upstream": upstream,
@@ -391,14 +467,29 @@ def dashboard_payload(config: ProxyConfig, host: str) -> Json:
                 model_payload = json.loads(response.read())
             models = [item["id"] for item in model_payload.get("data", []) if isinstance(item, dict) and isinstance(item.get("id"), str)]
             peer_upstream = str(candidate.get("upstream") or "Proxy").lower()
-            native_models = sorted(
-                set(models) & (ZEN_RESPONSES_MODELS if peer_upstream == "zen" else {"gpt-5.6-luna"})
-            )
-            capability_models = {
-                model: sorted(model_capabilities(model))
-                for model in models
-                if model_capabilities(model)
-            }
+            native_models: list[str] = []
+            capability_models: dict[str, list[str]] = {}
+            if peer_upstream == "combined":
+                for model in models:
+                    split = split_combined_model_slug(model)
+                    if split is None:
+                        continue
+                    product, raw_model = split
+                    native_set = ZEN_RESPONSES_MODELS if product == "zen" else {"gpt-5.6-luna"}
+                    if raw_model in native_set:
+                        native_models.append(model)
+                    capabilities = sorted(model_capabilities(raw_model))
+                    if capabilities:
+                        capability_models[model] = capabilities
+            else:
+                native_models = sorted(
+                    set(models) & (ZEN_RESPONSES_MODELS if peer_upstream == "zen" else {"gpt-5.6-luna"})
+                )
+                capability_models = {
+                    model: sorted(model_capabilities(model))
+                    for model in models
+                    if model_capabilities(model)
+                }
             service.update({
                 "ok": health.get("status") == "ok",
                 "models": models,
@@ -408,6 +499,11 @@ def dashboard_payload(config: ProxyConfig, host: str) -> Json:
                     "capability_models": capability_models,
                     "fallback_model": os.environ.get("OPENCODE_CAPABILITY_MODEL", CAPABILITY_MODEL_DEFAULT),
                     "vision_bridge_model": IMAGE_MODEL_DEFAULT if peer_upstream == "go" else None,
+                    "fallback_models": {
+                        "go": f'go/{os.environ.get("OPENCODE_GO_CAPABILITY_MODEL", CAPABILITY_MODEL_DEFAULT)}',
+                        "zen": f'zen/{os.environ.get("OPENCODE_ZEN_CAPABILITY_MODEL", CAPABILITY_MODEL_DEFAULT)}',
+                    } if peer_upstream == "combined" else {},
+                    "vision_bridge_models": {},
                 },
             })
         except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError):
@@ -434,13 +530,17 @@ def select_native_model(payload: Json, config: ProxyConfig) -> tuple[str | None,
 
     # Go already has a low-cost MiMo caption path for image-only requests.
     # Zen can send the original image to Luna, avoiding that conversion.
-    if not zen and requested_model not in available_native:
+    if not zen and not config.routed_from_combined and requested_model not in available_native:
         missing.discard("image")
 
     if not missing:
         return None, set()
 
-    configured_fallback = os.environ.get("OPENCODE_CAPABILITY_MODEL", CAPABILITY_MODEL_DEFAULT)
+    product_fallback_env = "OPENCODE_ZEN_CAPABILITY_MODEL" if zen else "OPENCODE_GO_CAPABILITY_MODEL"
+    configured_fallback = os.environ.get(
+        product_fallback_env,
+        os.environ.get("OPENCODE_CAPABILITY_MODEL", CAPABILITY_MODEL_DEFAULT),
+    )
     fallback_model = normalize_zen_model_slug(configured_fallback) if zen else normalize_model_slug(configured_fallback)
     unsupported = missing - model_capabilities(fallback_model)
     if fallback_model not in available_native or unsupported:
@@ -513,6 +613,15 @@ def handle_native_responses_stream(payload: Json, config: ProxyConfig, request_i
     try:
         with urllib.request.urlopen(request, timeout=config.timeout_sec) as response:
             for line in response:
+                if config.model_prefix:
+                    decoded = line.decode("utf-8", errors="replace").strip()
+                    if decoded.startswith("data: ") and decoded[6:] != "[DONE]":
+                        try:
+                            event = json.loads(decoded[6:])
+                            if isinstance(event, dict):
+                                line = b"data: " + json.dumps(externalize_response(event, config), separators=(",", ":")).encode("utf-8") + b"\n\n"
+                        except json.JSONDecodeError:
+                            pass
                 wfile.write(line)
                 wfile.flush()
     except urllib.error.HTTPError as exc:
@@ -611,11 +720,12 @@ def _stream_native_response_events(
         input_items=len(input_value) if isinstance(input_value, list) else None,
     )
     if isinstance(input_value, list) and not input_value:
-        _complete_empty_websocket_response(upstream_payload, request_id, on_event)
+        _complete_empty_websocket_response(upstream_payload, request_id, on_event, config)
         return
 
     api_key = resolve_api_key(config, request_id)
     raw_payload = json.dumps(upstream_payload, separators=(",", ":")).encode("utf-8")
+    owns_upstream = upstream is None
     if upstream is None:
         upstream = PersistentUpstreamConnection(config)
     trace("upstream.websocket.start", request_id=request_id, url=f"{config.chat_base_url}/responses", bytes=len(raw_payload))
@@ -648,7 +758,7 @@ def _stream_native_response_events(
                     response_value = event.get("response")
                     if isinstance(response_value, dict) and isinstance(response_value.get("status"), str):
                         final_status = response_value["status"]
-                on_event(event)
+                on_event(externalize_response(event, config))
         trace(
             "upstream.websocket.eof",
             request_id=request_id,
@@ -659,12 +769,19 @@ def _stream_native_response_events(
     except ProxyError as exc:
         trace("upstream.websocket.error", request_id=request_id, status=exc.status, body=exc.message[:4000])
         raise
+    finally:
+        if owns_upstream:
+            upstream.close()
 
 
-def _complete_empty_websocket_response(payload: Json, request_id: str, on_event: Any) -> None:
+def _complete_empty_websocket_response(
+    payload: Json, request_id: str, on_event: Any, config: ProxyConfig | None = None
+) -> None:
     """Acknowledge Desktop warm-up creates without sending invalid empty input upstream."""
     response_id = new_response_id()
     model = normalize_model_slug(payload.get("model"))
+    if config is not None:
+        model = config.external_model(model)
     created_at = now_unix()
     in_progress: Json = {
         "id": response_id,
@@ -819,7 +936,7 @@ def handle_websocket_responses(handler: ResponsesProxyHandler, config: ProxyConf
     handler.send_header("Sec-WebSocket-Accept", accept)
     handler.end_headers()
     trace("websocket.connected", path=handler.path)
-    upstream = PersistentUpstreamConnection(config)
+    upstream = None if _is_combined_upstream(config) else PersistentUpstreamConnection(config)
 
     try:
         while True:
@@ -845,9 +962,12 @@ def handle_websocket_responses(handler: ResponsesProxyHandler, config: ProxyConf
                 if not isinstance(event, dict) or event.get("type") != "response.create":
                     raise ValueError("expected a response.create event")
                 request_id = uuid.uuid4().hex[:12]
+                event, event_config, product = route_combined_payload(event, config)
+                if product:
+                    trace("request.combined_route", request_id=request_id, upstream=product, model=event.get("model"))
                 _stream_response_events(
                     event,
-                    config,
+                    event_config,
                     request_id,
                     lambda response_event: _write_ws_json(handler.wfile, response_event),
                     upstream,
@@ -857,7 +977,8 @@ def handle_websocket_responses(handler: ResponsesProxyHandler, config: ProxyConf
                 trace("websocket.request_failed", message=message)
                 _write_ws_json(handler.wfile, {"type": "error", "error": {"message": message}})
     finally:
-        upstream.close()
+        if upstream is not None:
+            upstream.close()
 
 
 def _stream_response_events(
@@ -870,7 +991,7 @@ def _stream_response_events(
     """Route one Desktop WebSocket create to native Responses or the chat bridge."""
     input_value = payload.get("input")
     if isinstance(input_value, list) and not input_value:
-        _complete_empty_websocket_response(payload, request_id, on_event)
+        _complete_empty_websocket_response(payload, request_id, on_event, config)
         return
     native_model, _fallback_capabilities = select_native_model(payload, config)
     if native_model is not None:
@@ -888,7 +1009,9 @@ def handle_streaming_request(
     on_event: Any | None = None,
 ) -> None:
     """Stream upstream response as SSE in real-time: created → text deltas → completed."""
-    chat_payload, request_model, conversion_stats = responses_payload_to_chat_payload(payload)
+    chat_payload, request_model, conversion_stats = responses_payload_to_chat_payload(
+        payload, zen=_is_zen_upstream(config)
+    )
 
     if conversion_stats.get("has_image") and conversion_stats.get("tools_present"):
         chat_payload = caption_images_in_messages(chat_payload, request_model, config, request_id)
@@ -899,7 +1022,7 @@ def handle_streaming_request(
           upstream_model=chat_payload.get("model"), stream=True)
 
     response_id = new_response_id()
-    model = request_model or DEFAULT_MODEL
+    model = config.external_model(request_model or DEFAULT_MODEL)
 
     client_alive = True
 
@@ -1317,7 +1440,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=int(os.environ.get("OPENCODE_GO_PROXY_PORT", "8787")))
     parser.add_argument(
         "--upstream",
-        choices=("go", "zen"),
+        choices=("go", "zen", "combined"),
         default=os.environ.get("OPENCODE_UPSTREAM", "go"),
         help="OpenCode upstream product (default: go)",
     )
@@ -1345,6 +1468,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="create the OpenCode Zen provider, profile, and compatible model catalog, then exit",
     )
+    parser.add_argument(
+        "--configure-codex-combined",
+        action="store_true",
+        help="create one prefixed Go + Zen provider, profiles, and combined model catalog, then exit",
+    )
     return parser
 
 
@@ -1360,16 +1488,20 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Codex configured for Zen: {config_path}")
         print(f"Model catalog: {catalog_path}")
         return
+    if args.configure_codex_combined:
+        config_path, catalog_path = configure_codex("combined")
+        print(f"Codex configured for combined Go + Zen: {config_path}")
+        print(f"Model catalog: {catalog_path}")
+        return
     config = ProxyConfig(
         bind=args.bind,
         port=args.port,
-        chat_base_url=args.chat_base_url or (
-            "https://opencode.ai/zen/v1" if args.upstream == "zen" else "https://opencode.ai/zen/go/v1"
-        ),
+        chat_base_url=args.chat_base_url or (ZEN_BASE_URL if args.upstream == "zen" else GO_BASE_URL),
         api_key_env=args.api_key_env,
         client_token_env=args.client_token_env,
         timeout_sec=args.timeout_sec,
         max_body_bytes=args.max_body_mb * 1024 * 1024,
+        upstream=args.upstream,
     )
     if config.bind not in {"127.0.0.1", "localhost", "::1"}:
         trace("security.warning", bind=config.bind,
@@ -1382,6 +1514,7 @@ def main(argv: list[str] | None = None) -> None:
         port=config.port,
         chat_base_url=config.chat_base_url,
         api_key_env=config.api_key_env,
+        upstream=config.upstream,
     )
     # serve_forever in a background thread: shutdown() from a signal handler
     # running on the main thread would otherwise deadlock (both need the main

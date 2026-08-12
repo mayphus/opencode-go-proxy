@@ -6,6 +6,8 @@
 
 - Zero-dependency read-only web dashboard for Go/Zen health, model discovery, capability routing,
   and copyable Desktop setup; its probes use only `/health` and `/models` and spend no tokens.
+- Combined Go + Zen mode with one provider, one port, explicit `go/` and `zen/` model prefixes,
+  one combined Codex catalog, and same-product Luna capability fallback.
 - OpenCode Zen mode with compatible Responses and Chat Completions model discovery, native
   passthrough where available, a separate Codex provider/catalog installer, and a PB62 test
   service on NodePort `32096`.
@@ -22,6 +24,7 @@
 
 ### Changed
 
+- PB62 now exposes one combined service on NodePort `32096` instead of separate Go/Zen ports.
 - README: document that the proxy exposes a single HTTP port (`OPENCODE_GO_PROXY_PORT`,
   default 8787) with no admin/control channel, how to verify what is listening
   (`lsof -nP -iTCP:8787 -sTCP:LISTEN`), and how to shorten the Codex provider label

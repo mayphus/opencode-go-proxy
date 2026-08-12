@@ -84,6 +84,20 @@ def server():
 
 
 class TestHealthAndModels:
+    def test_combined_models_are_prefixed(self, server):
+        port, httpd = server
+        httpd.config.upstream = "combined"
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/v1/models")
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        conn.close()
+        ids = {model["id"] for model in body["data"]}
+        assert "go/gpt-5.6-luna" in ids
+        assert "zen/gpt-5.6-luna" in ids
+        assert "zen/deepseek-v4-flash-free" in ids
+        assert "gpt-5.6-luna" not in ids
+
     def test_dashboard_is_served_without_model_request(self, server):
         port, _ = server
         conn = HTTPConnection("127.0.0.1", port, timeout=5)
@@ -181,6 +195,56 @@ class TestHealthAndModels:
 
 
 class TestResponsesRoundTrip:
+    def test_combined_zen_chat_request_uses_zen_upstream(self, server):
+        port, httpd = server
+        httpd.config.upstream = "combined"
+        mock_resp = mock_chat_response("ok", "deepseek-v4-flash-free")
+        with mock.patch.dict(os.environ, {"OPENCODE_GO_API_KEY": "test-key"}, clear=True), mock.patch(
+            "urllib.request.urlopen", return_value=MockUpstreamResponse(json.dumps(mock_resp).encode())
+        ) as urlopen:
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request(
+                "POST",
+                "/v1/responses",
+                json.dumps({"model": "zen/deepseek-v4-flash-free", "input": "hello"}),
+                {"content-type": "application/json"},
+            )
+            resp = conn.getresponse()
+            body = json.loads(resp.read())
+            conn.close()
+
+        assert resp.status == 200
+        assert body["model"] == "zen/deepseek-v4-flash-free"
+        assert urlopen.call_args.args[0].full_url == "https://opencode.ai/zen/v1/chat/completions"
+
+    def test_combined_zen_search_falls_back_within_zen(self, server):
+        port, httpd = server
+        httpd.config.upstream = "combined"
+        upstream = MockUpstreamResponse(json.dumps({"id": "resp_1", "model": "gpt-5.6-luna", "output": []}).encode())
+        with mock.patch.dict(os.environ, {"OPENCODE_GO_API_KEY": "test-key"}, clear=True), mock.patch(
+            "urllib.request.urlopen", return_value=upstream
+        ) as urlopen:
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request(
+                "POST",
+                "/v1/responses",
+                json.dumps({
+                    "model": "zen/deepseek-v4-flash-free",
+                    "input": "search",
+                    "tools": [{"type": "web_search"}],
+                }),
+                {"content-type": "application/json"},
+            )
+            resp = conn.getresponse()
+            body = json.loads(resp.read())
+            conn.close()
+
+        assert resp.status == 200
+        assert body["model"] == "zen/gpt-5.6-luna"
+        request = urlopen.call_args.args[0]
+        assert request.full_url == "https://opencode.ai/zen/v1/responses"
+        assert json.loads(request.data)["model"] == "gpt-5.6-luna"
+
     def test_client_token_is_optional_by_default(self, server):
         port, _ = server
         mock_resp = mock_chat_response("ok")

@@ -12,6 +12,7 @@ from opencode_go_proxy.app import (
     _stream_response_events,
     call_upstream_responses,
     resolve_api_key,
+    route_combined_payload,
     sanitize_websocket_payload,
     select_native_model,
 )
@@ -69,6 +70,69 @@ class CredentialTests(unittest.TestCase):
 
 
 class NativeResponsesTests(unittest.TestCase):
+    def test_combined_prefix_selects_go_without_changing_model(self) -> None:
+        config = make_config()
+        config.upstream = "combined"
+
+        payload, routed, product = route_combined_payload(
+            {"model": "go/gpt-5.6-luna", "input": "hello"}, config
+        )
+
+        self.assertEqual(product, "go")
+        self.assertEqual(payload["model"], "gpt-5.6-luna")
+        self.assertEqual(routed.chat_base_url, "https://opencode.ai/zen/go/v1")
+
+    def test_combined_prefix_selects_zen(self) -> None:
+        config = make_config()
+        config.upstream = "combined"
+
+        payload, routed, product = route_combined_payload(
+            {"model": "zen/deepseek-v4-flash-free", "input": "hello"}, config
+        )
+
+        self.assertEqual(product, "zen")
+        self.assertEqual(payload["model"], "deepseek-v4-flash-free")
+        self.assertEqual(routed.chat_base_url, "https://opencode.ai/zen/v1")
+
+    def test_combined_mode_rejects_unprefixed_model(self) -> None:
+        config = make_config()
+        config.upstream = "combined"
+
+        with self.assertRaises(ProxyError) as ctx:
+            route_combined_payload({"model": "gpt-5.6-luna", "input": "hello"}, config)
+
+        self.assertEqual(ctx.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertIn("go/<model> or zen/<model>", ctx.exception.message)
+
+    def test_same_product_fallback_uses_routed_product(self) -> None:
+        config = make_config()
+        config.upstream = "combined"
+        payload, routed, _ = route_combined_payload({
+            "model": "zen/deepseek-v4-flash-free",
+            "input": "search",
+            "tools": [{"type": "web_search"}],
+        }, config)
+
+        model, capabilities = select_native_model(payload, routed)
+
+        self.assertEqual(model, "gpt-5.6-luna")
+        self.assertEqual(capabilities, {"web_search"})
+        self.assertEqual(routed.chat_base_url, "https://opencode.ai/zen/v1")
+
+    def test_combined_go_image_falls_back_to_go_luna_without_caption_bridge(self) -> None:
+        config = make_config()
+        config.upstream = "combined"
+        payload, routed, _ = route_combined_payload({
+            "model": "go/deepseek-v4-flash",
+            "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,x"}]}],
+        }, config)
+
+        model, capabilities = select_native_model(payload, routed)
+
+        self.assertEqual(model, "gpt-5.6-luna")
+        self.assertEqual(capabilities, {"image"})
+        self.assertEqual(routed.chat_base_url, "https://opencode.ai/zen/go/v1")
+
     def test_zen_chat_model_uses_luna_for_hosted_search(self) -> None:
         config = make_config()
         config.chat_base_url = "https://opencode.ai/zen/v1"

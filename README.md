@@ -32,37 +32,57 @@ natively — it requires Responses-shaped providers. This proxy fixes that.
 ## Quick start
 
 ```bash
-# Install and run
+# Install and run one combined Go + Zen endpoint
 uvx --from git+https://github.com/zhengsanniu/opencode-go-proxy \
   opencode-go-proxy \
   --bind 127.0.0.1 \
-  --port 8787
+  --port 8787 \
+  --upstream combined
 
 # Point Codex at it (~/.codex/config.toml)
 ```
 
 ```toml
-[model_providers.opencode-go]
-name = "OpenCode Go"
+[model_providers.opencode]
+name = "OpenCode"
 base_url = "http://127.0.0.1:8787/v1"
 experimental_bearer_token = "any-string-here"
 wire_api = "responses"
 
-[profiles.deepseek-v4-flash]
-model_provider = "opencode-go"
-model = "deepseek-v4-flash"
-model_context_window = 1000000
+[profiles."luna-go"]
+model_provider = "opencode"
+model = "go/gpt-5.6-luna"
 approval_policy = "untrusted"
 sandbox_mode = "workspace-write"
 features = { memories = false }
+
+[profiles."deepseek-zen"]
+model_provider = "opencode"
+model = "zen/deepseek-v4-flash-free"
 ```
 
 ```bash
 # Start Codex with a profile
-codex -p deepseek-v4-flash
+codex -p luna-go
 ```
 
 ### Automatic Codex setup
+
+Recommended: install one provider, combined prefixed catalog, and starter profiles:
+
+```bash
+uv run opencode-go-proxy --configure-codex-combined
+codex -p luna-go       # Go subscription
+codex -p luna-zen      # Zen billing
+codex -p deepseek-zen  # Zen free model
+```
+
+The catalog uses explicit `go/<model>` and `zen/<model>` IDs. This prevents overlapping model
+names from accidentally changing the billing product. Capability fallback stays within that
+prefix: Go requests fall back to `go/gpt-5.6-luna`; Zen requests fall back to
+`zen/gpt-5.6-luna`.
+
+Legacy single-product setup remains available:
 
 To configure only the OpenCode Go GPT 5.6 Luna provider/profile and model selector entry:
 
@@ -109,13 +129,12 @@ arbitrary upstream errors or silently route ordinary text turns to another model
 Open the proxy root in a browser, for example `http://pb62.local:32096/`. The embedded,
 zero-dependency page shows Go/Zen health, available models, an interactive capability-route
 preview, and copyable Desktop configuration. Choose a model and capability to see whether the
-request stays native, uses the minimal Chat bridge, uses Go vision captioning, or moves intact to
-Luna. Its status checks call only `/health` and `/models`; loading or refreshing the page never
+request stays native, uses the minimal Chat bridge, or moves intact to the same-product Luna.
+Its status checks call only `/health` and `/models`; loading or refreshing the page never
 sends a prompt or spends model tokens.
 
-For a multi-service deployment, set `OPENCODE_DASHBOARD_PEERS` to a JSON array containing `name`,
-`upstream`, internal `probe_url`, and user-facing `public_url`. The Kubernetes example already
-connects its Go and Zen services this way.
+In combined mode the dashboard lists one service and prefixed Go/Zen models. Its routing preview
+shows native passthrough, Chat bridging, vision bridging, and same-product Luna fallback.
 
 ## Available models
 
@@ -258,11 +277,10 @@ uv run --no-editable opencode-go-verify --base-url http://127.0.0.1:8787/v1
 For the PB62 LAN test deployment (intentionally no client token):
 
 ```bash
-# OpenCode Go
-uv run --no-editable opencode-go-verify --base-url http://pb62.local:32095/v1
-
-# OpenCode Zen (this spends Zen tokens; use only when needed)
-uv run --no-editable opencode-go-verify --base-url http://pb62.local:32096/v1
+# Combined endpoint. This spends Go tokens; run only when a live check is needed.
+uv run --no-editable opencode-go-verify \
+  --base-url http://pb62.local:32096/v1 \
+  --model go/gpt-5.6-luna
 ```
 
 Luna requests automatically ask the upstream Responses API to compact at 800,000 tokens.
@@ -342,9 +360,8 @@ proxy running. To remove only the tray app:
 ### Container and Kubernetes
 
 The included `Containerfile` runs the stdlib-only proxy directly from source as an
-unprivileged user. `deploy/kubernetes.yaml` is a hardened example with separate single-replica
-Go and Zen deployments, health probes, resource limits, a LAN-scoped NetworkPolicy, and
-NodePorts `32095` (Go) and `32096` (Zen).
+unprivileged user. `deploy/kubernetes.yaml` is a hardened single-replica combined Go + Zen
+example with health probes, resource limits, a LAN-scoped NetworkPolicy, and NodePort `32096`.
 
 Create `opencode-go-proxy-credentials` separately with the `upstream-api-key` key; never
 put its value in the manifest. The example is restricted to `192.168.36.0/24` by its
@@ -360,7 +377,7 @@ All flags have environment variable defaults:
 |------|---------|---------|
 | `--bind` | `OPENCODE_GO_PROXY_BIND` | `127.0.0.1` |
 | `--port` | `OPENCODE_GO_PROXY_PORT` | `8787` |
-| `--upstream` | `OPENCODE_UPSTREAM` | `go` |
+| `--upstream` | `OPENCODE_UPSTREAM` | `go` (`combined` recommended for both products) |
 | `--chat-base-url` | `CHAT_COMPLETIONS_BASE_URL` | selected by `--upstream` |
 | `--api-key-env` | `OPENCODE_GO_PROXY_API_KEY_ENV` | `OPENCODE_GO_API_KEY` |
 | `--client-token-env` | `OPENCODE_GO_PROXY_CLIENT_TOKEN_ENV` | `OPENCODE_GO_PROXY_CLIENT_TOKEN` |
