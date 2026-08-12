@@ -570,13 +570,28 @@ def sanitize_websocket_payload(payload: Json) -> Json:
                 item["type"] = "function_call_output"
             sanitized_items.append(item)
         upstream_payload["input"] = _prune_before_latest_compaction(sanitized_items)
-    if extracted_tools:
-        existing_tools = upstream_payload.get("tools")
-        upstream_payload["tools"] = _dedupe_json_items([
-            *(existing_tools if isinstance(existing_tools, list) else []),
-            *extracted_tools,
-        ])
+    existing_tools = upstream_payload.get("tools")
+    merged_tools = _dedupe_json_items([
+        *(existing_tools if isinstance(existing_tools, list) else []),
+        *extracted_tools,
+    ])
+    # Some Desktop request paths omit the hosted search tool even though the
+    # selected Luna model supports it. Make the native capability available so
+    # search questions do not have to fall back to browser automation.
+    if _native_search_enabled() and not any(
+        isinstance(tool, dict) and tool.get("type") in {"web_search", "web_search_preview"}
+        for tool in merged_tools
+    ):
+        merged_tools.append({"type": "web_search"})
+    if merged_tools:
+        upstream_payload["tools"] = merged_tools
     return upstream_payload
+
+
+def _native_search_enabled() -> bool:
+    """Enable Luna's native hosted search unless explicitly disabled."""
+    raw = os.environ.get("OPENCODE_GO_NATIVE_SEARCH", "1").strip().lower()
+    return raw not in {"", "0", "off", "false", "no"}
 
 
 def _native_compact_threshold() -> int | None:

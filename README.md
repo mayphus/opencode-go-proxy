@@ -199,7 +199,12 @@ See the [lazycodex docs](https://github.com/code-yeongyu/oh-my-openagent) for se
 - Configurable body cap, bind address guard, keychain credential resolution
 - Local health and model-list endpoints
 - Native Luna server-side compaction before long chats reach the context limit
+- Automatic native Luna web search when Desktop omits the hosted search tool
 - A live capability verifier for text, structured output, vision, search, and tool loops
+
+Luna always receives its native `web_search` tool unless the client already supplied
+`web_search` or `web_search_preview`. Browser tools remain available for interactive browsing.
+Set `OPENCODE_GO_NATIVE_SEARCH=0` to disable automatic native search injection.
 
 ### Verify Luna capabilities
 

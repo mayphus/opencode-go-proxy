@@ -116,6 +116,7 @@ class WebSocketResponsesTests(unittest.TestCase):
         ])
         self.assertEqual(result["tools"], [
             {"type": "function", "name": "browser_open", "parameters": {}},
+            {"type": "web_search"},
         ])
         self.assertEqual(result["context_management"], [
             {"type": "compaction", "compact_threshold": 800000},
@@ -171,7 +172,31 @@ class WebSocketResponsesTests(unittest.TestCase):
             "input": "open Google",
         })
 
-        self.assertEqual(result["tools"], [tool])
+        self.assertEqual(result["tools"], [tool, {"type": "web_search"}])
+
+    def test_sanitizer_adds_native_search_when_desktop_omits_it(self) -> None:
+        result = sanitize_websocket_payload({
+            "model": "gpt-5.6-luna",
+            "tools": [{"type": "custom", "name": "browser", "description": "Use the browser"}],
+            "input": "search the web for today's news",
+        })
+
+        self.assertEqual(result["tools"], [
+            {"type": "custom", "name": "browser", "description": "Use the browser"},
+            {"type": "web_search"},
+        ])
+
+    def test_native_search_can_be_disabled(self) -> None:
+        with mock.patch.dict(os.environ, {"OPENCODE_GO_NATIVE_SEARCH": "0"}):
+            result = sanitize_websocket_payload({
+                "model": "gpt-5.6-luna",
+                "tools": [{"type": "custom", "name": "browser", "description": "Use the browser"}],
+                "input": "open Google",
+            })
+
+        self.assertEqual(result["tools"], [
+            {"type": "custom", "name": "browser", "description": "Use the browser"},
+        ])
 
     def test_native_compaction_can_be_disabled(self) -> None:
         with mock.patch.dict(os.environ, {"OPENCODE_GO_COMPACT_THRESHOLD": "0"}):
@@ -211,6 +236,7 @@ class WebSocketResponsesTests(unittest.TestCase):
         self.assertIs(result["stream"], True)
         self.assertEqual(result["tools"], [
             {"type": "custom", "name": "browser", "description": "Use the browser"},
+            {"type": "web_search"},
         ])
 
     def test_empty_input_completes_locally_without_upstream_call(self) -> None:

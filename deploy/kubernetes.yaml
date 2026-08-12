@@ -25,7 +25,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: proxy
-          image: localhost/opencode-go-proxy:dev-20260812-final
+          image: localhost/opencode-go-proxy:dev-20260812-native-search
           imagePullPolicy: Never
           args: ["--bind", "0.0.0.0", "--port", "8787"]
           env:
