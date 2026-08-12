@@ -4,17 +4,11 @@ from opencode_go_proxy.protocol import (
     chat_completion_to_response,
     required_capabilities,
     responses_payload_to_chat_payload,
-    split_combined_model_slug,
     supports_native_responses,
 )
 
 
 class ProtocolTests(unittest.TestCase):
-    def test_combined_model_prefix_requires_known_product_and_model(self) -> None:
-        self.assertEqual(split_combined_model_slug("go/gpt-5.6-luna"), ("go", "gpt-5.6-luna"))
-        self.assertEqual(split_combined_model_slug("zen/deepseek-v4-flash-free"), ("zen", "deepseek-v4-flash-free"))
-        self.assertIsNone(split_combined_model_slug("gpt-5.6-luna"))
-        self.assertIsNone(split_combined_model_slug("go/deepseek-v4-flash-free"))
     def test_gpt_5_6_luna_is_responses_native(self) -> None:
         self.assertTrue(supports_native_responses("gpt-5.6-luna"))
         self.assertTrue(supports_native_responses("opencode-go/gpt-5.6-luna"))

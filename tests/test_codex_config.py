@@ -58,21 +58,40 @@ class CodexConfigTests(unittest.TestCase):
         self.assertFalse(deepseek["use_responses_lite"])
         self.assertTrue(deepseek["supports_search_tool"])
 
-    def test_configures_one_combined_provider_with_prefixed_catalog(self) -> None:
+    def test_configures_endpoint_routed_go_and_zen_providers(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"CODEX_HOME": directory}):
             config_path, catalog_path = configure_codex("combined")
             config = tomllib.loads(config_path.read_text(encoding="utf-8"))
             catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(config["model_providers"]["opencode"]["wire_api"], "responses")
-        self.assertEqual(config["profiles"]["luna-go"]["model"], "go/gpt-5.6-luna")
-        self.assertEqual(config["profiles"]["luna-zen"]["model"], "zen/gpt-5.6-luna")
-        self.assertEqual(config["profiles"]["deepseek-zen"]["model"], "zen/deepseek-v4-flash-free")
+        self.assertEqual(config["model_providers"]["opencode-go"]["base_url"], "http://127.0.0.1:8787/zen/go/v1")
+        self.assertEqual(config["model_providers"]["opencode-zen"]["base_url"], "http://127.0.0.1:8787/zen/v1")
+        self.assertEqual(config["profiles"]["luna-go"]["model_provider"], "opencode-go")
+        self.assertEqual(config["profiles"]["luna-go"]["model"], "gpt-5.6-luna")
+        self.assertEqual(config["profiles"]["luna-zen"]["model_provider"], "opencode-zen")
+        self.assertEqual(config["profiles"]["luna-zen"]["model"], "gpt-5.6-luna")
+        self.assertEqual(config["profiles"]["deepseek-zen"]["model"], "deepseek-v4-flash-free")
+        self.assertEqual(config["model_catalog_json"], str(catalog_path))
+        self.assertEqual(set(catalog), {"fetched_at", "etag", "client_version", "models"})
         slugs = {model["slug"] for model in catalog["models"]}
-        self.assertIn("go/gpt-5.6-luna", slugs)
-        self.assertIn("zen/gpt-5.6-luna", slugs)
-        self.assertIn("zen/deepseek-v4-flash-free", slugs)
-        self.assertNotIn("gpt-5.6-luna", slugs)
+        self.assertEqual(len(slugs), len(catalog["models"]))
+        self.assertIn("gpt-5.6-luna", slugs)
+        self.assertIn("deepseek-v4-flash-free", slugs)
+        self.assertFalse(any("/" in slug for slug in slugs))
+
+    def test_combined_setup_migrates_prefixed_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"CODEX_HOME": directory}):
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                '[profiles."luna-go"]\nmodel_provider = "opencode"\nmodel = "go/gpt-5.6-luna"\n',
+                encoding="utf-8",
+            )
+
+            configure_codex("combined")
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(config["profiles"]["luna-go"]["model_provider"], "opencode-go")
+        self.assertEqual(config["profiles"]["luna-go"]["model"], "gpt-5.6-luna")
 
     def test_existing_config_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"CODEX_HOME": directory}):

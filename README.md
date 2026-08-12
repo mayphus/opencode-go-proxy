@@ -32,7 +32,7 @@ natively — it requires Responses-shaped providers. This proxy fixes that.
 ## Quick start
 
 ```bash
-# Install and run one combined Go + Zen endpoint
+# Install and run one Go + Zen proxy
 uvx --from git+https://github.com/zhengsanniu/opencode-go-proxy \
   opencode-go-proxy \
   --bind 127.0.0.1 \
@@ -43,22 +43,30 @@ uvx --from git+https://github.com/zhengsanniu/opencode-go-proxy \
 ```
 
 ```toml
-[model_providers.opencode]
-name = "OpenCode"
-base_url = "http://127.0.0.1:8787/v1"
+model_catalog_json = "/home/you/.codex/model-catalogs/opencode.json"
+
+[model_providers.opencode-go]
+name = "OpenCode Go"
+base_url = "http://127.0.0.1:8787/zen/go/v1"
 experimental_bearer_token = "any-string-here"
 wire_api = "responses"
 
 [profiles."luna-go"]
-model_provider = "opencode"
-model = "go/gpt-5.6-luna"
+model_provider = "opencode-go"
+model = "gpt-5.6-luna"
 approval_policy = "untrusted"
 sandbox_mode = "workspace-write"
 features = { memories = false }
 
+[model_providers.opencode-zen]
+name = "OpenCode Zen"
+base_url = "http://127.0.0.1:8787/zen/v1"
+experimental_bearer_token = "any-string-here"
+wire_api = "responses"
+
 [profiles."deepseek-zen"]
-model_provider = "opencode"
-model = "zen/deepseek-v4-flash-free"
+model_provider = "opencode-zen"
+model = "deepseek-v4-flash-free"
 ```
 
 ```bash
@@ -68,7 +76,7 @@ codex -p luna-go
 
 ### Automatic Codex setup
 
-Recommended: install one provider, combined prefixed catalog, and starter profiles:
+Recommended: install endpoint-routed Go and Zen providers, one shared catalog, and starter profiles:
 
 ```bash
 uv run opencode-go-proxy --configure-codex-combined
@@ -77,10 +85,13 @@ codex -p luna-zen      # Zen billing
 codex -p deepseek-zen  # Zen free model
 ```
 
-The catalog uses explicit `go/<model>` and `zen/<model>` IDs. This prevents overlapping model
-names from accidentally changing the billing product. Capability fallback stays within that
-prefix: Go requests fall back to `go/gpt-5.6-luna`; Zen requests fall back to
-`zen/gpt-5.6-luna`.
+This writes the shared ModelsCache catalog to `~/.codex/model-catalogs/opencode.json` and sets
+the top-level `model_catalog_json` key in `~/.codex/config.toml`. The catalog contains the union
+of supported Go and Zen model slugs without `go/` or `zen/` prefixes; the selected provider URL
+still determines which product receives the request.
+
+Model IDs stay in OpenCode's normal unprefixed form. The provider URL chooses the billing product:
+Go uses `/zen/go/v1`, while Zen uses `/zen/v1`. Capability fallback stays on the selected endpoint.
 
 Legacy single-product setup remains available:
 
@@ -133,7 +144,7 @@ request stays native, uses the minimal Chat bridge, or moves intact to the same-
 Its status checks call only `/health` and `/models`; loading or refreshing the page never
 sends a prompt or spends model tokens.
 
-In combined mode the dashboard lists one service and prefixed Go/Zen models. Its routing preview
+In combined mode the dashboard lists separate Go and Zen endpoint services with ordinary model IDs. Its routing preview
 shows native passthrough, Chat bridging, vision bridging, and same-product Luna fallback.
 
 ## Available models
@@ -278,7 +289,7 @@ and automatic skill usage instructions.
 Run the same end-to-end checks after an upgrade or deployment:
 
 ```bash
-uv run --no-editable opencode-go-verify --base-url http://127.0.0.1:8787/v1
+uv run --no-editable opencode-go-verify --base-url http://127.0.0.1:8787/zen/go/v1
 ```
 
 To save live evidence for the dashboard, point both processes at the same report path:
@@ -286,7 +297,7 @@ To save live evidence for the dashboard, point both processes at the same report
 ```bash
 export OPENCODE_CAPABILITY_REPORT="$PWD/capabilities.json"
 uv run --no-editable opencode-go-verify \
-  --base-url http://127.0.0.1:8787/v1 \
+  --base-url http://127.0.0.1:8787/zen/go/v1 \
   --report "$OPENCODE_CAPABILITY_REPORT"
 ```
 
@@ -298,10 +309,10 @@ calls a model.
 For the PB62 LAN test deployment (intentionally no client token):
 
 ```bash
-# Combined endpoint. This spends Go tokens; run only when a live check is needed.
+# Go endpoint. This spends Go tokens; run only when a live check is needed.
 uv run --no-editable opencode-go-verify \
-  --base-url http://pb62.local:32096/v1 \
-  --model go/gpt-5.6-luna
+  --base-url http://pb62.local:32096/zen/go/v1 \
+  --model gpt-5.6-luna
 ```
 
 Luna requests automatically ask the upstream Responses API to compact at 800,000 tokens.

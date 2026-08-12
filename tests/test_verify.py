@@ -40,12 +40,12 @@ def test_url_citation_detection():
 
 
 def test_verification_report_distinguishes_evidence_states():
-    report = verification_report("go/gpt-5.6-luna", [
+    report = verification_report("gpt-5.6-luna", [
         CheckResult("web_search", True, "citation observed"),
         CheckResult("prompt_cache_options", False, "HTTP 400"),
     ])
 
-    assert report["model"] == "go/gpt-5.6-luna"
+    assert report["model"] == "gpt-5.6-luna"
     assert report["capabilities"]["web_search"]["status"] == "verified"
     assert report["capabilities"]["prompt_caching"]["status"] == "rejected"
     assert report["capabilities"]["file_search"]["status"] == "untested"

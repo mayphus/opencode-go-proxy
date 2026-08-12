@@ -36,7 +36,7 @@ spec:
                   name: opencode-go-proxy-credentials
                   key: upstream-api-key
             - name: OPENCODE_DASHBOARD_PEERS
-              value: '[{"name":"OpenCode Go + Zen","upstream":"Combined","probe_url":"http://proxy:8787/v1","public_url":"http://pb62.local:32096/v1"}]'
+              value: '[{"name":"OpenCode Go","upstream":"Go","probe_url":"http://proxy:8787/zen/go/v1","public_url":"http://pb62.local:32096/zen/go/v1"},{"name":"OpenCode Zen","upstream":"Zen","probe_url":"http://proxy:8787/zen/v1","public_url":"http://pb62.local:32096/zen/v1"}]'
           ports:
             - name: http
               containerPort: 8787

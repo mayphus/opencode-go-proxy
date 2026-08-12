@@ -38,7 +38,6 @@ ZEN_CHAT_MODELS = {
     "nemotron-3.5-lightning-free",
 }
 ZEN_MODELS = ZEN_RESPONSES_MODELS | ZEN_CHAT_MODELS
-COMBINED_MODELS = {f"go/{model}" for model in GO_MODELS} | {f"zen/{model}" for model in ZEN_MODELS}
 
 HOSTED_TOOL_CAPABILITIES = {
     "web_search": "web_search",
@@ -120,17 +119,6 @@ def normalize_zen_model_slug(model: Any) -> str:
         return DEFAULT_MODEL
     model = model.removeprefix("opencode-go/").removeprefix("opencode-zen/")
     return model if model in ZEN_MODELS else DEFAULT_MODEL
-
-
-def split_combined_model_slug(model: Any) -> tuple[str, str] | None:
-    """Split an explicit go/ or zen/ model id without guessing billing intent."""
-    if not isinstance(model, str):
-        return None
-    product, separator, slug = model.partition("/")
-    if not separator or product not in {"go", "zen"}:
-        return None
-    allowed = GO_MODELS if product == "go" else ZEN_MODELS
-    return (product, slug) if slug in allowed else None
 
 
 def supports_native_responses(model: Any) -> bool:

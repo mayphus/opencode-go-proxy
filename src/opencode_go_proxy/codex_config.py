@@ -101,15 +101,14 @@ def _zen_catalog() -> dict[str, Any]:
 def _combined_catalog() -> dict[str, Any]:
     template = CATALOG["models"][0]
     entries: list[dict[str, Any]] = []
-    pairs = [("go", slug) for slug in sorted(GO_MODELS)] + [("zen", slug) for slug in sorted(ZEN_MODELS)]
-    for priority, (product, slug) in enumerate(pairs):
+    for priority, slug in enumerate(sorted(GO_MODELS | ZEN_MODELS)):
         model = deepcopy(template)
         model.update({
-            "slug": f"{product}/{slug}",
-            "display_name": f"{product.title()} · {slug.replace('-', ' ').title().replace('Gpt', 'GPT').replace('Glm', 'GLM')}",
-            "description": f"OpenCode {product.title()} model with same-product capability fallback.",
+            "slug": slug,
+            "display_name": slug.replace('-', ' ').title().replace('Gpt', 'GPT').replace('Glm', 'GLM'),
+            "description": "OpenCode model; the provider endpoint selects Go or Zen.",
             "priority": 200 - priority,
-            "use_responses_lite": slug == MODEL_SLUG if product == "go" else slug in ZEN_RESPONSES_MODELS,
+            "use_responses_lite": slug in ZEN_RESPONSES_MODELS,
         })
         if not slug.startswith("gpt-5.6-"):
             model["context_window"] = 128000
@@ -119,7 +118,7 @@ def _combined_catalog() -> dict[str, Any]:
         entries.append(model)
     return {
         "fetched_at": "2026-08-12T00:00:00.000000Z",
-        "etag": 'W/"opencode-combined-prefixed-v1"',
+        "etag": 'W/"opencode-endpoint-routed-v1"',
         "client_version": CATALOG["client_version"],
         "models": entries,
     }
@@ -152,11 +151,17 @@ def _ensure_section(lines: list[str], section: str, entries: list[str]) -> None:
         lines.extend(entries)
         return
 
-    _start, end = bounds
-    existing = "\n".join(lines[_start:end])
-    missing = [entry for entry in entries if entry.split("=", 1)[0].strip() not in existing]
-    if missing:
-        lines[end:end] = missing
+    start, end = bounds
+    for entry in entries:
+        key = entry.split("=", 1)[0].strip()
+        pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+        for index in range(start + 1, end):
+            if pattern.match(lines[index]):
+                lines[index] = entry
+                break
+        else:
+            lines.insert(end, entry)
+            end += 1
 
 
 def _ensure_top_level_key(lines: list[str], key: str, value: str) -> None:
@@ -176,21 +181,24 @@ def configure_codex(upstream: str = "go") -> tuple[Path, Path]:
     if upstream not in {"go", "zen", "combined"}:
         raise ValueError("upstream must be 'go', 'zen', or 'combined'")
     if upstream == "combined":
-        provider_name = "opencode"
-        provider_display_name = "OpenCode"
         catalog_filename = "opencode.json"
         catalog = _combined_catalog()
         profiles = [
-            ("luna-go", f"go/{MODEL_SLUG}"),
-            ("luna-zen", f"zen/{MODEL_SLUG}"),
-            ("deepseek-zen", "zen/deepseek-v4-flash-free"),
+            ("luna-go", "opencode-go", MODEL_SLUG),
+            ("luna-zen", "opencode-zen", MODEL_SLUG),
+            ("deepseek-zen", "opencode-zen", "deepseek-v4-flash-free"),
+        ]
+        providers = [
+            ("opencode-go", "OpenCode Go", "http://127.0.0.1:8787/zen/go/v1"),
+            ("opencode-zen", "OpenCode Zen", "http://127.0.0.1:8787/zen/v1"),
         ]
     else:
         provider_name = "opencode-zen" if upstream == "zen" else PROVIDER_NAME
         provider_display_name = "OpenCode Zen" if upstream == "zen" else "OpenCode Go"
         catalog_filename = "opencode-zen.json" if upstream == "zen" else CATALOG_FILENAME
         catalog = _zen_catalog() if upstream == "zen" else CATALOG
-        profiles = [(f"{MODEL_SLUG}-zen" if upstream == "zen" else MODEL_SLUG, MODEL_SLUG)]
+        profiles = [(f"{MODEL_SLUG}-zen" if upstream == "zen" else MODEL_SLUG, provider_name, MODEL_SLUG)]
+        providers = [(provider_name, provider_display_name, "http://127.0.0.1:8787/v1")]
     codex_home = _codex_home()
     codex_home.mkdir(parents=True, exist_ok=True)
     config_path = codex_home / "config.toml"
@@ -199,17 +207,18 @@ def configure_codex(upstream: str = "go") -> tuple[Path, Path]:
 
     lines = config_path.read_text(encoding="utf-8").splitlines() if config_path.exists() else []
     _ensure_top_level_key(lines, "model_catalog_json", str(catalog_path))
-    _ensure_section(
-        lines,
-        f"model_providers.{provider_name}",
-        [
-            f'name = "{provider_display_name}"',
-            'base_url = "http://127.0.0.1:8787/v1"',
-            'experimental_bearer_token = "local-proxy"',
-            'wire_api = "responses"',
-        ],
-    )
-    for profile_name, profile_model in profiles:
+    for configured_name, configured_display_name, base_url in providers:
+        _ensure_section(
+            lines,
+            f"model_providers.{configured_name}",
+            [
+                f'name = "{configured_display_name}"',
+                f'base_url = "{base_url}"',
+                'experimental_bearer_token = "local-proxy"',
+                'wire_api = "responses"',
+            ],
+        )
+    for profile_name, profile_provider, profile_model in profiles:
         profile_section = f'profiles."{profile_name}"'
         legacy_profile_section = f"profiles.{profile_name}"
         legacy_bounds = _section_bounds(lines, legacy_profile_section)
@@ -219,7 +228,7 @@ def configure_codex(upstream: str = "go") -> tuple[Path, Path]:
             lines,
             profile_section,
             [
-                f'model_provider = "{provider_name}"',
+                f'model_provider = "{profile_provider}"',
                 f'model = "{profile_model}"',
                 f'model_context_window = {1050000 if profile_model.endswith(MODEL_SLUG) else 128000}',
                 'approval_policy = "untrusted"',
