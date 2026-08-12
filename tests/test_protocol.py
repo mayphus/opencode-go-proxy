@@ -2,6 +2,7 @@ import unittest
 
 from opencode_go_proxy.protocol import (
     chat_completion_to_response,
+    required_capabilities,
     responses_payload_to_chat_payload,
     supports_native_responses,
 )
@@ -11,6 +12,32 @@ class ProtocolTests(unittest.TestCase):
     def test_gpt_5_6_luna_is_responses_native(self) -> None:
         self.assertTrue(supports_native_responses("gpt-5.6-luna"))
         self.assertTrue(supports_native_responses("opencode-go/gpt-5.6-luna"))
+        self.assertTrue(supports_native_responses("opencode-zen/gpt-5.6-sol"))
+
+    def test_detects_image_and_hosted_tool_capabilities(self) -> None:
+        capabilities = required_capabilities({
+            "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,x"}]}],
+            "tools": [
+                {"type": "web_search"},
+                {"type": "file_search"},
+                {"type": "computer_use_preview"},
+                {"type": "code_interpreter"},
+                {"type": "image_generation"},
+                {"type": "mcp"},
+                {"type": "tool_search"},
+                {"type": "hosted_shell"},
+                {"type": "programmatic_tool_calling"},
+                {"type": "multi_agent"},
+                {"type": "function", "name": "local_tool"},
+            ],
+            "context_management": [{"type": "compaction", "compact_threshold": 200000}],
+        })
+
+        self.assertEqual(capabilities, {
+            "image", "web_search", "file_search", "computer_use", "code_interpreter",
+            "image_generation", "mcp", "tool_search", "hosted_shell",
+            "programmatic_tool_calling", "multi_agent", "compaction",
+        })
 
     def test_string_input_maps_to_user_message(self) -> None:
         chat, _model, stats = responses_payload_to_chat_payload(

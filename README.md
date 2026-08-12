@@ -78,6 +78,45 @@ Set `CODEX_HOME` to use a different Codex directory. Start it with:
 codex -p gpt-5.6-luna
 ```
 
+### OpenCode Zen
+
+Zen uses the same proxy with its pay-as-you-go upstream:
+
+```bash
+uv run opencode-go-proxy --upstream zen
+```
+
+To install the Zen provider, a `gpt-5.6-luna-zen` profile, and a Desktop model catalog containing
+only the models supported without extra Anthropic/Gemini protocol conversion:
+
+```bash
+uv run opencode-go-proxy --configure-codex-zen
+codex -p gpt-5.6-luna-zen
+```
+
+Zen `/responses` models are passed through natively. Zen `/chat/completions` models use the
+existing Responses bridge for text and local function/custom tools over both HTTP and Desktop
+WebSocket sessions. When a selected model lacks image input or a hosted Responses tool, the whole
+request moves to `gpt-5.6-luna` so native tool items and citations survive. Override this with
+`OPENCODE_CAPABILITY_MODEL`.
+
+The automatic capability router covers image input, web search, file search, computer use, code
+interpreter, image generation, MCP, tool search, hosted shell, and skills. It does not retry
+arbitrary upstream errors or silently route ordinary text turns to another model.
+
+### Web dashboard
+
+Open the proxy root in a browser, for example `http://pb62.local:32096/`. The embedded,
+zero-dependency page shows Go/Zen health, available models, an interactive capability-route
+preview, and copyable Desktop configuration. Choose a model and capability to see whether the
+request stays native, uses the minimal Chat bridge, uses Go vision captioning, or moves intact to
+Luna. Its status checks call only `/health` and `/models`; loading or refreshing the page never
+sends a prompt or spends model tokens.
+
+For a multi-service deployment, set `OPENCODE_DASHBOARD_PEERS` to a JSON array containing `name`,
+`upstream`, internal `probe_url`, and user-facing `public_url`. The Kubernetes example already
+connects its Go and Zen services this way.
+
 ## Available models
 
 All OpenCode Go models work through this proxy. GPT 5.6 Luna uses native Responses passthrough;
@@ -149,11 +188,11 @@ The proxy picks the upstream model based on what Codex sends:
 2. If the model slug is a known OpenCode Go model (from the catalog), it's used as-is.
 3. Otherwise, it falls back to `deepseek-v4-flash`.
 
-When images are present in a turn with tools, Chat Completions models route to MiMo V2.5 for
-image captioning (it's the cheapest vision model on Go), then route the main turn to your
-configured model. Responses-native models with native image/search support, including GPT 5.6
-Luna, bypass this fallback and keep the original image and hosted-tool payload. Override the
-legacy vision model with `CODEX_IMAGE_MODEL`.
+On OpenCode Go, images sent to Chat Completions models route through MiMo V2.5 for image
+captioning, then return to the configured model. Responses-native models with native
+image/search support, including GPT 5.6 Luna, bypass this fallback and keep the original image
+and hosted-tool payload. On Zen, requests needing a missing native capability move intact to
+Luna instead. Override the legacy Go vision model with `CODEX_IMAGE_MODEL`.
 
 ## API key
 
@@ -194,10 +233,12 @@ See the [lazycodex docs](https://github.com/code-yeongyu/oh-my-openagent) for se
 - Reasoning content replay across tool-call turns
 - Real-time SSE streaming (not synthesized)
 - Responses WebSocket mode for Codex Desktop, bridged to upstream Responses SSE
-- Image captioning via MiMo V2.5 when tools are present (override with `CODEX_IMAGE_MODEL`)
+- Go image captioning via MiMo V2.5 when tools are present (override with `CODEX_IMAGE_MODEL`)
+- Zen capability-aware routing to native Luna without translating hosted tool calls
 - SSRF protection on image URLs (`data:image/` and `https://` only)
 - Configurable body cap, bind address guard, keychain credential resolution
 - Local health and model-list endpoints
+- Token-free embedded Go/Zen dashboard and Desktop setup generator
 - Native Luna server-side compaction before long chats reach the context limit
 - Automatic native Luna web search when Desktop omits the hosted search tool
 - A live capability verifier for text, structured output, vision, search, and tool loops
@@ -217,7 +258,11 @@ uv run --no-editable opencode-go-verify --base-url http://127.0.0.1:8787/v1
 For the PB62 LAN test deployment (intentionally no client token):
 
 ```bash
+# OpenCode Go
 uv run --no-editable opencode-go-verify --base-url http://pb62.local:32095/v1
+
+# OpenCode Zen (this spends Zen tokens; use only when needed)
+uv run --no-editable opencode-go-verify --base-url http://pb62.local:32096/v1
 ```
 
 Luna requests automatically ask the upstream Responses API to compact at 800,000 tokens.
@@ -297,8 +342,9 @@ proxy running. To remove only the tray app:
 ### Container and Kubernetes
 
 The included `Containerfile` runs the stdlib-only proxy directly from source as an
-unprivileged user. `deploy/kubernetes.yaml` is a hardened single-replica example with
-health probes, resource limits, a LAN-scoped NetworkPolicy, and NodePort `32095`.
+unprivileged user. `deploy/kubernetes.yaml` is a hardened example with separate single-replica
+Go and Zen deployments, health probes, resource limits, a LAN-scoped NetworkPolicy, and
+NodePorts `32095` (Go) and `32096` (Zen).
 
 Create `opencode-go-proxy-credentials` separately with the `upstream-api-key` key; never
 put its value in the manifest. The example is restricted to `192.168.36.0/24` by its
@@ -314,7 +360,8 @@ All flags have environment variable defaults:
 |------|---------|---------|
 | `--bind` | `OPENCODE_GO_PROXY_BIND` | `127.0.0.1` |
 | `--port` | `OPENCODE_GO_PROXY_PORT` | `8787` |
-| `--chat-base-url` | `CHAT_COMPLETIONS_BASE_URL` | `https://opencode.ai/zen/go/v1` |
+| `--upstream` | `OPENCODE_UPSTREAM` | `go` |
+| `--chat-base-url` | `CHAT_COMPLETIONS_BASE_URL` | selected by `--upstream` |
 | `--api-key-env` | `OPENCODE_GO_PROXY_API_KEY_ENV` | `OPENCODE_GO_API_KEY` |
 | `--client-token-env` | `OPENCODE_GO_PROXY_CLIENT_TOKEN_ENV` | `OPENCODE_GO_PROXY_CLIENT_TOKEN` |
 | `--timeout-sec` | `OPENCODE_GO_PROXY_TIMEOUT_SEC` | `180` |

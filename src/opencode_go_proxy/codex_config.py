@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
+
+from .protocol import ZEN_MODELS, ZEN_RESPONSES_MODELS
 
 MODEL_SLUG = "gpt-5.6-luna"
 PROVIDER_NAME = "opencode-go"
@@ -69,6 +72,32 @@ CATALOG: dict[str, Any] = {
 }
 
 
+def _zen_catalog() -> dict[str, Any]:
+    template = CATALOG["models"][0]
+    models = []
+    for priority, slug in enumerate(sorted(ZEN_MODELS, key=lambda value: (not value.startswith("gpt-5.6"), value))):
+        model = deepcopy(template)
+        model.update({
+            "slug": slug,
+            "display_name": slug.replace("-", " ").title().replace("Gpt", "GPT").replace("Glm", "GLM"),
+            "description": "OpenCode Zen model with automatic native capability fallback.",
+            "priority": 100 - priority,
+            "use_responses_lite": slug in ZEN_RESPONSES_MODELS,
+        })
+        if not slug.startswith("gpt-5.6-"):
+            model["context_window"] = 128000
+            model["max_context_window"] = 128000
+            model["auto_compact_token_limit"] = 110000
+            model["model_messages"]["token_budget"]["auto_compact_token_limit"] = 110000
+        models.append(model)
+    return {
+        "fetched_at": "2026-08-12T00:00:00.000000Z",
+        "etag": 'W/"opencode-zen-compatible-v1"',
+        "client_version": CATALOG["client_version"],
+        "models": models,
+    }
+
+
 def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
 
@@ -115,28 +144,35 @@ def _ensure_top_level_key(lines: list[str], key: str, value: str) -> None:
     lines[insertion:insertion] = [f'{key} = {json.dumps(value)}', ""]
 
 
-def configure_codex() -> tuple[Path, Path]:
-    """Create the Luna provider/profile and model selector entry idempotently."""
+def configure_codex(upstream: str = "go") -> tuple[Path, Path]:
+    """Create an OpenCode provider/profile and selector catalog idempotently."""
+    if upstream not in {"go", "zen"}:
+        raise ValueError("upstream must be 'go' or 'zen'")
+    provider_name = "opencode-zen" if upstream == "zen" else PROVIDER_NAME
+    provider_display_name = "OpenCode Zen" if upstream == "zen" else "OpenCode Go"
+    catalog_filename = "opencode-zen.json" if upstream == "zen" else CATALOG_FILENAME
+    catalog = _zen_catalog() if upstream == "zen" else CATALOG
+    profile_name = f"{MODEL_SLUG}-zen" if upstream == "zen" else MODEL_SLUG
     codex_home = _codex_home()
     codex_home.mkdir(parents=True, exist_ok=True)
     config_path = codex_home / "config.toml"
-    catalog_path = codex_home / "model-catalogs" / CATALOG_FILENAME
+    catalog_path = codex_home / "model-catalogs" / catalog_filename
     catalog_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines = config_path.read_text(encoding="utf-8").splitlines() if config_path.exists() else []
     _ensure_top_level_key(lines, "model_catalog_json", str(catalog_path))
     _ensure_section(
         lines,
-        f"model_providers.{PROVIDER_NAME}",
+        f"model_providers.{provider_name}",
         [
-            'name = "OpenCode Go"',
+            f'name = "{provider_display_name}"',
             'base_url = "http://127.0.0.1:8787/v1"',
             'experimental_bearer_token = "local-proxy"',
             'wire_api = "responses"',
         ],
     )
-    profile_section = f'profiles."{MODEL_SLUG}"'
-    legacy_profile_section = f"profiles.{MODEL_SLUG}"
+    profile_section = f'profiles."{profile_name}"'
+    legacy_profile_section = f"profiles.{profile_name}"
     legacy_bounds = _section_bounds(lines, legacy_profile_section)
     if legacy_bounds is not None and _section_bounds(lines, profile_section) is None:
         lines[legacy_bounds[0]] = f"[{profile_section}]"
@@ -144,7 +180,7 @@ def configure_codex() -> tuple[Path, Path]:
         lines,
         profile_section,
         [
-            f'model_provider = "{PROVIDER_NAME}"',
+            f'model_provider = "{provider_name}"',
             f'model = "{MODEL_SLUG}"',
             "model_context_window = 1050000",
             'approval_policy = "untrusted"',
@@ -153,5 +189,5 @@ def configure_codex() -> tuple[Path, Path]:
         ],
     )
     config_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    catalog_path.write_text(json.dumps(CATALOG, indent=2) + "\n", encoding="utf-8")
+    catalog_path.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
     return config_path, catalog_path

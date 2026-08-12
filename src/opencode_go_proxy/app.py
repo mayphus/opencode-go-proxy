@@ -24,7 +24,9 @@ from urllib.parse import urlsplit
 
 from . import __version__
 from .codex_config import configure_codex
+from .dashboard import DASHBOARD_CSS, DASHBOARD_HTML, DASHBOARD_JS
 from .protocol import (
+    CAPABILITY_MODEL_DEFAULT,
     DEFAULT_MODEL,
     IMAGE_MODEL_DEFAULT,
     KNOWN_MODELS,
@@ -32,10 +34,14 @@ from .protocol import (
     chat_message_to_response_output,
     new_response_id,
     normalize_model_slug,
+    normalize_zen_model_slug,
     normalize_usage,
+    model_capabilities,
+    required_capabilities,
     now_unix,
     responses_payload_to_chat_payload,
-    supports_native_responses,
+    ZEN_MODELS,
+    ZEN_RESPONSES_MODELS,
 )
 
 Json = dict[str, Any]
@@ -82,13 +88,28 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
                 return
             handle_websocket_responses(self, config)
             return
+        if self.path == "/":
+            self._send_asset(DASHBOARD_HTML, "text/html; charset=utf-8")
+            return
+        if self.path == "/dashboard.css":
+            self._send_asset(DASHBOARD_CSS, "text/css; charset=utf-8")
+            return
+        if self.path == "/dashboard.js":
+            self._send_asset(DASHBOARD_JS, "text/javascript; charset=utf-8")
+            return
+        if self.path == "/dashboard.json":
+            config: ProxyConfig = self.server.config  # type: ignore[attr-defined]
+            self._send_json(dashboard_payload(config, self.headers.get("host", "127.0.0.1")))
+            return
         if self.path in {"/health", "/v1/health"}:
             self._send_json({"status": "ok"})
             return
         if self.path in {"/models", "/v1/models"}:
+            config: ProxyConfig = self.server.config  # type: ignore[attr-defined]
+            models = ZEN_MODELS if _is_zen_upstream(config) else KNOWN_MODELS
             self._send_json({
                 "object": "list",
-                "data": [{"id": slug, "object": "model"} for slug in sorted(KNOWN_MODELS)],
+                "data": [{"id": slug, "object": "model"} for slug in sorted(models)],
             })
             return
         self._send_json({"error": {"message": "not found"}}, status=HTTPStatus.NOT_FOUND)
@@ -120,9 +141,24 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
                 model=payload.get("model"),
                 stream=payload.get("stream", False),
             )
-            if supports_native_responses(payload.get("model")):
+            native_model, fallback_capabilities = select_native_model(payload, config)
+            if native_model is not None:
+                requested_model = (
+                    normalize_zen_model_slug(payload.get("model"))
+                    if _is_zen_upstream(config)
+                    else normalize_model_slug(payload.get("model"))
+                )
+                payload["model"] = native_model
+                if fallback_capabilities:
+                    trace(
+                        "request.capability_fallback",
+                        request_id=request_id,
+                        requested_model=requested_model,
+                        fallback_model=native_model,
+                        capabilities=sorted(fallback_capabilities),
+                    )
                 payload = sanitize_websocket_payload(payload)
-                payload["model"] = normalize_model_slug(payload.get("model"))
+                payload["model"] = native_model
                 input_value = payload.get("input")
                 trace(
                     "request.native_payload",
@@ -199,6 +235,20 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(raw)))
+        self.send_header("cache-control", "no-store")
+        self.send_header("x-content-type-options", "nosniff")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _send_asset(self, content: str, content_type: str) -> None:
+        raw = content.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(raw)))
+        self.send_header("cache-control", "no-cache")
+        self.send_header("content-security-policy", "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header("x-content-type-options", "nosniff")
+        self.send_header("referrer-policy", "no-referrer")
         self.end_headers()
         self.wfile.write(raw)
 
@@ -295,6 +345,111 @@ def handle_responses_request(payload: Json, config: ProxyConfig, request_id: str
         usage=response.get("usage"),
     )
     return response
+
+
+def _is_zen_upstream(config: ProxyConfig) -> bool:
+    return "/zen/v1" in config.chat_base_url and "/zen/go/v1" not in config.chat_base_url
+
+
+def dashboard_payload(config: ProxyConfig, host: str) -> Json:
+    """Return read-only service status; probes only health/model-list endpoints."""
+    upstream = "Zen" if _is_zen_upstream(config) else "Go"
+    default_peer = {
+        "name": f"OpenCode {upstream}",
+        "upstream": upstream,
+        "probe_url": f"http://{host}/v1",
+        "public_url": f"http://{host}/v1",
+    }
+    raw_peers = os.environ.get("OPENCODE_DASHBOARD_PEERS", "")
+    try:
+        peers = json.loads(raw_peers) if raw_peers else [default_peer]
+    except json.JSONDecodeError:
+        peers = [default_peer]
+    if not isinstance(peers, list):
+        peers = [default_peer]
+
+    services: list[Json] = []
+    for candidate in peers[:8]:
+        if not isinstance(candidate, dict):
+            continue
+        probe_url = str(candidate.get("probe_url", "")).rstrip("/")
+        parsed = urlsplit(probe_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            continue
+        service: Json = {
+            "name": str(candidate.get("name") or "OpenCode"),
+            "upstream": str(candidate.get("upstream") or "Proxy"),
+            "public_url": str(candidate.get("public_url") or probe_url),
+            "ok": False,
+            "models": [],
+            "model_count": 0,
+        }
+        try:
+            with urllib.request.urlopen(f"{probe_url}/health", timeout=1.5) as response:
+                health = json.loads(response.read())
+            with urllib.request.urlopen(f"{probe_url}/models", timeout=1.5) as response:
+                model_payload = json.loads(response.read())
+            models = [item["id"] for item in model_payload.get("data", []) if isinstance(item, dict) and isinstance(item.get("id"), str)]
+            peer_upstream = str(candidate.get("upstream") or "Proxy").lower()
+            native_models = sorted(
+                set(models) & (ZEN_RESPONSES_MODELS if peer_upstream == "zen" else {"gpt-5.6-luna"})
+            )
+            capability_models = {
+                model: sorted(model_capabilities(model))
+                for model in models
+                if model_capabilities(model)
+            }
+            service.update({
+                "ok": health.get("status") == "ok",
+                "models": models,
+                "model_count": len(models),
+                "routing": {
+                    "native_models": native_models,
+                    "capability_models": capability_models,
+                    "fallback_model": os.environ.get("OPENCODE_CAPABILITY_MODEL", CAPABILITY_MODEL_DEFAULT),
+                    "vision_bridge_model": IMAGE_MODEL_DEFAULT if peer_upstream == "go" else None,
+                },
+            })
+        except (OSError, ValueError, urllib.error.URLError, json.JSONDecodeError):
+            pass
+        services.append(service)
+    return {"services": services, "token_free": True}
+
+
+def select_native_model(payload: Json, config: ProxyConfig) -> tuple[str | None, set[str]]:
+    """Choose native Responses passthrough, including capability fallback."""
+    zen = _is_zen_upstream(config)
+    requested_model = (
+        normalize_zen_model_slug(payload.get("model")) if zen else normalize_model_slug(payload.get("model"))
+    )
+    required = required_capabilities(payload)
+    available_native = ZEN_RESPONSES_MODELS if zen else {"gpt-5.6-luna"}
+
+    if requested_model in available_native:
+        missing = required - model_capabilities(requested_model)
+        if not missing:
+            return requested_model, set()
+    else:
+        missing = required
+
+    # Go already has a low-cost MiMo caption path for image-only requests.
+    # Zen can send the original image to Luna, avoiding that conversion.
+    if not zen and requested_model not in available_native:
+        missing.discard("image")
+
+    if not missing:
+        return None, set()
+
+    configured_fallback = os.environ.get("OPENCODE_CAPABILITY_MODEL", CAPABILITY_MODEL_DEFAULT)
+    fallback_model = normalize_zen_model_slug(configured_fallback) if zen else normalize_model_slug(configured_fallback)
+    unsupported = missing - model_capabilities(fallback_model)
+    if fallback_model not in available_native or unsupported:
+        details = ", ".join(sorted(unsupported or missing))
+        raise ProxyError(
+            HTTPStatus.BAD_GATEWAY,
+            f"no native fallback model is available for requested capabilities: {details}",
+        )
+    return fallback_model, missing
 
 
 def call_upstream_responses(payload: Json, config: ProxyConfig, request_id: str) -> Json:
@@ -422,8 +577,25 @@ def _stream_native_response_events(
     upstream: PersistentUpstreamConnection | None = None,
 ) -> None:
     """Stream native Responses events from Go and pass decoded JSON to a transport."""
-    upstream_payload = sanitize_websocket_payload(payload)
-    upstream_payload["model"] = normalize_model_slug(upstream_payload.get("model"))
+    native_model, fallback_capabilities = select_native_model(payload, config)
+    if native_model is None:
+        raise ProxyError(HTTPStatus.BAD_REQUEST, "this model requires HTTP Responses mode through the Chat Completions bridge")
+    upstream_payload = dict(payload)
+    requested_model = (
+        normalize_zen_model_slug(payload.get("model"))
+        if _is_zen_upstream(config)
+        else normalize_model_slug(payload.get("model"))
+    )
+    upstream_payload["model"] = native_model
+    if fallback_capabilities:
+        trace(
+            "request.capability_fallback",
+            request_id=request_id,
+            requested_model=requested_model,
+            fallback_model=native_model,
+            capabilities=sorted(fallback_capabilities),
+        )
+    upstream_payload = sanitize_websocket_payload(upstream_payload)
     upstream_payload["stream"] = True
     input_value = upstream_payload.get("input")
     input_types = []
@@ -542,7 +714,7 @@ def sanitize_websocket_payload(payload: Json) -> Json:
     # Desktop already sends full history, so discard previous_response_id and replay
     # its supplied items with store disabled.
     upstream_payload["store"] = False
-    if "context_management" not in upstream_payload:
+    if "compaction" in model_capabilities(upstream_payload.get("model")) and "context_management" not in upstream_payload:
         compact_threshold = _native_compact_threshold()
         if compact_threshold:
             upstream_payload["context_management"] = [
@@ -578,7 +750,7 @@ def sanitize_websocket_payload(payload: Json) -> Json:
     # Some Desktop request paths omit the hosted search tool even though the
     # selected Luna model supports it. Make the native capability available so
     # search questions do not have to fall back to browser automation.
-    if _native_search_enabled() and not any(
+    if "web_search" in model_capabilities(upstream_payload.get("model")) and _native_search_enabled() and not any(
         isinstance(tool, dict) and tool.get("type") in {"web_search", "web_search_preview"}
         for tool in merged_tools
     ):
@@ -673,7 +845,13 @@ def handle_websocket_responses(handler: ResponsesProxyHandler, config: ProxyConf
                 if not isinstance(event, dict) or event.get("type") != "response.create":
                     raise ValueError("expected a response.create event")
                 request_id = uuid.uuid4().hex[:12]
-                _stream_native_response_events(event, config, request_id, lambda response_event: _write_ws_json(handler.wfile, response_event), upstream)
+                _stream_response_events(
+                    event,
+                    config,
+                    request_id,
+                    lambda response_event: _write_ws_json(handler.wfile, response_event),
+                    upstream,
+                )
             except (ProxyError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
                 message = getattr(exc, "message", str(exc))
                 trace("websocket.request_failed", message=message)
@@ -682,7 +860,33 @@ def handle_websocket_responses(handler: ResponsesProxyHandler, config: ProxyConf
         upstream.close()
 
 
-def handle_streaming_request(payload: Json, config: ProxyConfig, request_id: str, wfile: Any) -> None:
+def _stream_response_events(
+    payload: Json,
+    config: ProxyConfig,
+    request_id: str,
+    on_event: Any,
+    upstream: PersistentUpstreamConnection | None = None,
+) -> None:
+    """Route one Desktop WebSocket create to native Responses or the chat bridge."""
+    input_value = payload.get("input")
+    if isinstance(input_value, list) and not input_value:
+        _complete_empty_websocket_response(payload, request_id, on_event)
+        return
+    native_model, _fallback_capabilities = select_native_model(payload, config)
+    if native_model is not None:
+        _stream_native_response_events(payload, config, request_id, on_event, upstream)
+        return
+    handle_streaming_request(payload, config, request_id, None, on_event=on_event)
+
+
+def handle_streaming_request(
+    payload: Json,
+    config: ProxyConfig,
+    request_id: str,
+    wfile: Any,
+    *,
+    on_event: Any | None = None,
+) -> None:
     """Stream upstream response as SSE in real-time: created → text deltas → completed."""
     chat_payload, request_model, conversion_stats = responses_payload_to_chat_payload(payload)
 
@@ -703,6 +907,9 @@ def handle_streaming_request(payload: Json, config: ProxyConfig, request_id: str
         nonlocal client_alive
         if not client_alive:
             return
+        if on_event is not None:
+            on_event(event)
+            return
         try:
             wfile.write(b"data: " + json.dumps(event, separators=(",", ":")).encode("utf-8") + b"\n\n")
             wfile.flush()
@@ -712,7 +919,7 @@ def handle_streaming_request(payload: Json, config: ProxyConfig, request_id: str
 
     def send_error(msg: str) -> None:
         send_event({"type": "response.error", "error": {"message": msg}})
-        if client_alive:
+        if client_alive and on_event is None:
             wfile.write(b"data: [DONE]\n\n")
             wfile.flush()
 
@@ -754,6 +961,8 @@ def handle_streaming_request(payload: Json, config: ProxyConfig, request_id: str
     keepalive_stop = threading.Event()
 
     def keepalive() -> None:
+        if on_event is not None:
+            return
         while not keepalive_stop.wait(15):
             if not client_alive:
                 return
@@ -928,8 +1137,9 @@ def handle_streaming_request(payload: Json, config: ProxyConfig, request_id: str
         "output_text": text, "usage": normalize_usage(usage),
     }
     send_event({"type": "response.completed", "response": final})
-    wfile.write(b"data: [DONE]\n\n")
-    wfile.flush()
+    if on_event is None:
+        wfile.write(b"data: [DONE]\n\n")
+        wfile.flush()
     trace("response.converted", request_id=request_id, output_items=len(output),
           output_text_len=len(text), usage=final.get("usage"), stream=True)
 
@@ -1106,9 +1316,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bind", default=os.environ.get("OPENCODE_GO_PROXY_BIND", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("OPENCODE_GO_PROXY_PORT", "8787")))
     parser.add_argument(
+        "--upstream",
+        choices=("go", "zen"),
+        default=os.environ.get("OPENCODE_UPSTREAM", "go"),
+        help="OpenCode upstream product (default: go)",
+    )
+    parser.add_argument(
         "--chat-base-url",
         dest="chat_base_url",
-        default=os.environ.get("CHAT_COMPLETIONS_BASE_URL", "https://opencode.ai/zen/go/v1"),
+        default=os.environ.get("CHAT_COMPLETIONS_BASE_URL"),
+        help="override the upstream base URL selected by --upstream",
     )
     parser.add_argument("--api-key-env", default=os.environ.get("OPENCODE_GO_PROXY_API_KEY_ENV", "OPENCODE_GO_API_KEY"))
     parser.add_argument(
@@ -1123,6 +1340,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="create the OpenCode Go Luna provider, profile, and model catalog, then exit",
     )
+    parser.add_argument(
+        "--configure-codex-zen",
+        action="store_true",
+        help="create the OpenCode Zen provider, profile, and compatible model catalog, then exit",
+    )
     return parser
 
 
@@ -1133,10 +1355,17 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Codex configured: {config_path}")
         print(f"Model catalog: {catalog_path}")
         return
+    if args.configure_codex_zen:
+        config_path, catalog_path = configure_codex("zen")
+        print(f"Codex configured for Zen: {config_path}")
+        print(f"Model catalog: {catalog_path}")
+        return
     config = ProxyConfig(
         bind=args.bind,
         port=args.port,
-        chat_base_url=args.chat_base_url,
+        chat_base_url=args.chat_base_url or (
+            "https://opencode.ai/zen/v1" if args.upstream == "zen" else "https://opencode.ai/zen/go/v1"
+        ),
         api_key_env=args.api_key_env,
         client_token_env=args.client_token_env,
         timeout_sec=args.timeout_sec,

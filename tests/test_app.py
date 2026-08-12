@@ -9,9 +9,11 @@ from opencode_go_proxy.app import (
     ProxyConfig,
     ProxyError,
     _stream_native_response_events,
+    _stream_response_events,
     call_upstream_responses,
     resolve_api_key,
     sanitize_websocket_payload,
+    select_native_model,
 )
 
 
@@ -67,6 +69,70 @@ class CredentialTests(unittest.TestCase):
 
 
 class NativeResponsesTests(unittest.TestCase):
+    def test_zen_chat_model_uses_luna_for_hosted_search(self) -> None:
+        config = make_config()
+        config.chat_base_url = "https://opencode.ai/zen/v1"
+
+        model, capabilities = select_native_model({
+            "model": "deepseek-v4-flash-free",
+            "input": "search",
+            "tools": [{"type": "web_search"}],
+        }, config)
+
+        self.assertEqual(model, "gpt-5.6-luna")
+        self.assertEqual(capabilities, {"web_search"})
+
+    def test_zen_chat_model_uses_luna_for_image_input(self) -> None:
+        config = make_config()
+        config.chat_base_url = "https://opencode.ai/zen/v1"
+
+        model, capabilities = select_native_model({
+            "model": "deepseek-v4-flash",
+            "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,x"}]}],
+        }, config)
+
+        self.assertEqual(model, "gpt-5.6-luna")
+        self.assertEqual(capabilities, {"image"})
+
+    def test_zen_chat_model_stays_on_chat_path_for_local_functions(self) -> None:
+        config = make_config()
+        config.chat_base_url = "https://opencode.ai/zen/v1"
+
+        model, capabilities = select_native_model({
+            "model": "deepseek-v4-flash",
+            "input": "read a file",
+            "tools": [{"type": "function", "name": "read_file"}],
+        }, config)
+
+        self.assertIsNone(model)
+        self.assertEqual(capabilities, set())
+
+    def test_unknown_native_capabilities_fall_back_to_luna(self) -> None:
+        config = make_config()
+        config.chat_base_url = "https://opencode.ai/zen/v1"
+
+        model, capabilities = select_native_model({
+            "model": "gpt-5.5-pro",
+            "input": "use the computer",
+            "tools": [{"type": "computer_use_preview"}],
+        }, config)
+
+        self.assertEqual(model, "gpt-5.6-luna")
+        self.assertEqual(capabilities, {"computer_use"})
+
+    def test_zen_native_model_falls_back_for_compaction(self) -> None:
+        config = make_config()
+        config.chat_base_url = "https://opencode.ai/zen/v1"
+
+        model, capabilities = select_native_model({
+            "model": "gpt-5.5",
+            "input": "continue",
+            "context_management": [{"type": "compaction", "compact_threshold": 200000}],
+        }, config)
+
+        self.assertEqual(model, "gpt-5.6-luna")
+        self.assertEqual(capabilities, {"compaction"})
+
     def test_luna_payload_is_sent_to_responses_endpoint_unchanged(self) -> None:
         upstream_response = mock.MagicMock()
         upstream_response.status = 200
@@ -92,6 +158,49 @@ class NativeResponsesTests(unittest.TestCase):
 
 
 class WebSocketResponsesTests(unittest.TestCase):
+    def test_zen_chat_model_websocket_uses_chat_bridge(self) -> None:
+        config = make_config()
+        config.chat_base_url = "https://opencode.ai/zen/v1"
+        events: list[dict[str, object]] = []
+        on_event = events.append
+
+        with mock.patch("opencode_go_proxy.app.handle_streaming_request") as chat_stream, mock.patch(
+            "opencode_go_proxy.app._stream_native_response_events"
+        ) as native_stream:
+            _stream_response_events(
+                {"type": "response.create", "model": "deepseek-v4-flash-free", "input": "hello"},
+                config,
+                "req-chat-ws",
+                on_event,
+            )
+
+        native_stream.assert_not_called()
+        chat_stream.assert_called_once()
+        self.assertIsNone(chat_stream.call_args.args[3])
+        self.assertIs(chat_stream.call_args.kwargs["on_event"], on_event)
+
+    def test_zen_chat_model_websocket_capability_fallback_stays_native(self) -> None:
+        config = make_config()
+        config.chat_base_url = "https://opencode.ai/zen/v1"
+
+        with mock.patch("opencode_go_proxy.app.handle_streaming_request") as chat_stream, mock.patch(
+            "opencode_go_proxy.app._stream_native_response_events"
+        ) as native_stream:
+            _stream_response_events(
+                {
+                    "type": "response.create",
+                    "model": "deepseek-v4-flash-free",
+                    "input": "search",
+                    "tools": [{"type": "web_search"}],
+                },
+                config,
+                "req-native-ws",
+                mock.Mock(),
+            )
+
+        chat_stream.assert_not_called()
+        native_stream.assert_called_once()
+
     def test_sanitizer_uses_stateless_history_and_preserves_reasoning(self) -> None:
         result = sanitize_websocket_payload({
             "type": "response.create",
@@ -197,6 +306,12 @@ class WebSocketResponsesTests(unittest.TestCase):
         self.assertEqual(result["tools"], [
             {"type": "custom", "name": "browser", "description": "Use the browser"},
         ])
+
+    def test_unverified_native_model_does_not_gain_luna_defaults(self) -> None:
+        result = sanitize_websocket_payload({"model": "gpt-5.5", "input": "hello"})
+
+        self.assertNotIn("context_management", result)
+        self.assertNotIn("tools", result)
 
     def test_native_compaction_can_be_disabled(self) -> None:
         with mock.patch.dict(os.environ, {"OPENCODE_GO_COMPACT_THRESHOLD": "0"}):

@@ -10,20 +10,66 @@ Json = dict[str, Any]
 
 DEFAULT_MODEL = "deepseek-v4-flash"
 IMAGE_MODEL_DEFAULT = "mimo-v2.5"
+CAPABILITY_MODEL_DEFAULT = "gpt-5.6-luna"
+
+GO_MODELS = {
+    "deepseek-v4-flash", "deepseek-v4-pro", "mimo-v2.5", "mimo-v2.5-pro",
+    "glm-5.2", "glm-5.1", "kimi-k2.7-code", "kimi-k2.6", "minimax-m3",
+    "minimax-m2.7", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
+    "gpt-5.6-luna",
+}
+
+# Zen models that can use the two wire protocols this proxy already speaks.
+# Models served through Anthropic /messages or Gemini model-specific endpoints
+# are intentionally excluded to keep conversion narrow and predictable.
+ZEN_RESPONSES_MODELS = {
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.5-pro",
+    "gpt-5.4", "gpt-5.4-pro", "gpt-5.4-mini", "gpt-5.4-nano",
+    "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex",
+    "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini",
+    "gpt-5", "gpt-5-codex", "gpt-5-nano", "grok-4.5", "grok-build-0.1",
+}
+ZEN_CHAT_MODELS = {
+    "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-free",
+    "minimax-m3", "minimax-m2.7", "minimax-m2.5", "glm-5.2", "glm-5.1", "glm-5",
+    "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "kimi-k3", "big-pickle",
+    "mimo-v2.5-free", "hy3-free", "laguna-s-2.1-free", "ling-3.0-tiny-free",
+    "longcat-2.0-free", "north-mini-code-free", "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+}
+ZEN_MODELS = ZEN_RESPONSES_MODELS | ZEN_CHAT_MODELS
+
+HOSTED_TOOL_CAPABILITIES = {
+    "web_search": "web_search",
+    "web_search_preview": "web_search",
+    "file_search": "file_search",
+    "computer": "computer_use",
+    "computer_use": "computer_use",
+    "computer_use_preview": "computer_use",
+    "code_interpreter": "code_interpreter",
+    "image_generation": "image_generation",
+    "mcp": "mcp",
+    "tool_search": "tool_search",
+    "hosted_shell": "hosted_shell",
+    "shell": "hosted_shell",
+    "skills": "skills",
+    "skill": "skills",
+    "programmatic_tool_calling": "programmatic_tool_calling",
+    "multi_agent": "multi_agent",
+}
+FULL_NATIVE_CAPABILITIES = {
+    "image", "web_search", "file_search", "computer_use", "code_interpreter",
+    "image_generation", "mcp", "tool_search", "hosted_shell", "skills",
+    "programmatic_tool_calling", "multi_agent", "compaction",
+}
 
 # GPT 5.6 Luna is exposed by OpenCode Go through the Responses API. Keep its
 # native request path so Responses-only tools and multimodal input survive.
 MODEL_CAPABILITIES: dict[str, dict[str, bool]] = {
-    "gpt-5.6-luna": {
-        "native_responses": True,
-        "supports_image": True,
-        "supports_search": True,
-    },
+    model: {"native_responses": True, **{f"supports_{capability}": True for capability in FULL_NATIVE_CAPABILITIES}}
+    for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 }
-NATIVE_RESPONSES_MODELS = {
-    model for model, capabilities in MODEL_CAPABILITIES.items()
-    if capabilities.get("native_responses")
-}
+NATIVE_RESPONSES_MODELS = set(ZEN_RESPONSES_MODELS)
 
 # Map OpenAI/Codex model slugs to OpenCode Go equivalents.
 # When Codex sends a model not in the catalog, the alias map provides the replacement.
@@ -54,22 +100,71 @@ def _load_catalog_models() -> set[str]:
         return {DEFAULT_MODEL, IMAGE_MODEL_DEFAULT}
 
 
-KNOWN_MODELS: set[str] = _load_catalog_models()
-KNOWN_MODELS.update(MODEL_CAPABILITIES)
+KNOWN_MODELS: set[str] = _load_catalog_models() | GO_MODELS
 
 
 def normalize_model_slug(model: Any) -> str:
     """Normalize Codex/OpenCode model names to the OpenCode Go model id."""
     if not isinstance(model, str) or not model:
         return DEFAULT_MODEL
-    model = model.removeprefix("opencode-go/")
+    model = model.removeprefix("opencode-go/").removeprefix("opencode-zen/")
     if model in MODEL_ALIASES:
         return MODEL_ALIASES[model]
     return model if model in KNOWN_MODELS else DEFAULT_MODEL
 
 
+def normalize_zen_model_slug(model: Any) -> str:
+    """Normalize a model for the pay-as-you-go Zen catalog without Go aliases."""
+    if not isinstance(model, str) or not model:
+        return DEFAULT_MODEL
+    model = model.removeprefix("opencode-go/").removeprefix("opencode-zen/")
+    return model if model in ZEN_MODELS else DEFAULT_MODEL
+
+
 def supports_native_responses(model: Any) -> bool:
+    if isinstance(model, str) and model.startswith("opencode-zen/"):
+        return normalize_zen_model_slug(model) in NATIVE_RESPONSES_MODELS
     return normalize_model_slug(model) in NATIVE_RESPONSES_MODELS
+
+
+def model_capabilities(model: Any) -> set[str]:
+    """Return capabilities explicitly verified for a model."""
+    raw = model.removeprefix("opencode-go/").removeprefix("opencode-zen/") if isinstance(model, str) else model
+    normalized = raw if raw in MODEL_CAPABILITIES else normalize_model_slug(model)
+    capabilities = MODEL_CAPABILITIES.get(normalized, {})
+    return {
+        key.removeprefix("supports_")
+        for key, supported in capabilities.items()
+        if key.startswith("supports_") and supported
+    }
+
+
+def required_capabilities(payload: Json) -> set[str]:
+    """Detect native-only capabilities requested by a Responses payload."""
+    required: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            item_type = value.get("type")
+            if item_type in {"input_image", "image", "image_url"}:
+                required.add("image")
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(payload.get("input"))
+    if payload.get("context_management") is not None:
+        required.add("compaction")
+    tools = payload.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if isinstance(tool, dict):
+                capability = HOSTED_TOOL_CAPABILITIES.get(str(tool.get("type", "")))
+                if capability:
+                    required.add(capability)
+    return required
 
 
 def new_response_id() -> str:

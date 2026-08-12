@@ -84,6 +84,57 @@ def server():
 
 
 class TestHealthAndModels:
+    def test_dashboard_is_served_without_model_request(self, server):
+        port, _ = server
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        body = resp.read().decode()
+        conn.close()
+
+        assert resp.status == 200
+        assert resp.headers["content-type"] == "text/html; charset=utf-8"
+        assert "This page never calls a model" in body
+        assert "default-src 'self'" in resp.headers["content-security-policy"]
+
+    def test_dashboard_status_uses_only_health_and_models(self, server):
+        port, _ = server
+        peers = json.dumps([{
+            "name": "Local test",
+            "upstream": "Go",
+            "probe_url": f"http://127.0.0.1:{port}/v1",
+            "public_url": "http://example.test/v1",
+        }])
+        with mock.patch.dict(os.environ, {"OPENCODE_DASHBOARD_PEERS": peers}, clear=True):
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/dashboard.json")
+            resp = conn.getresponse()
+            body = json.loads(resp.read())
+            conn.close()
+
+        assert resp.status == 200
+        assert body["token_free"] is True
+        assert body["services"][0]["ok"] is True
+        assert body["services"][0]["public_url"] == "http://example.test/v1"
+        assert body["services"][0]["model_count"] > 0
+        routing = body["services"][0]["routing"]
+        assert routing["fallback_model"] == "gpt-5.6-luna"
+        assert routing["vision_bridge_model"] == "mimo-v2.5"
+        assert "gpt-5.6-luna" in routing["native_models"]
+        assert "web_search" in routing["capability_models"]["gpt-5.6-luna"]
+
+    def test_dashboard_assets_are_same_origin(self, server):
+        port, _ = server
+        for path, content_type in (("/dashboard.css", "text/css"), ("/dashboard.js", "text/javascript")):
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            body = resp.read()
+            conn.close()
+            assert resp.status == 200
+            assert resp.headers["content-type"].startswith(content_type)
+            assert body
+
     def test_health_endpoint(self, server):
         port, _ = server
         conn = HTTPConnection("127.0.0.1", port, timeout=5)
@@ -113,6 +164,8 @@ class TestHealthAndModels:
         assert body["object"] == "list"
         ids = [m["id"] for m in body["data"]]
         assert "deepseek-v4-flash" in ids
+        assert "gpt-5.6-luna" in ids
+        assert "deepseek-v4-flash-free" not in ids
 
     def test_404_returns_generic_message(self, server):
         port, _ = server
@@ -271,6 +324,48 @@ class TestResponsesRoundTrip:
         resp = conn.getresponse()
         conn.close()
         assert resp.status == 404
+
+
+class TestZenCapabilityRouting:
+    def test_chat_model_hosted_tool_routes_to_native_luna(self, server):
+        port, httpd = server
+        httpd.config.chat_base_url = "https://opencode.ai/zen/v1"  # type: ignore[attr-defined]
+        native_response = {
+            "id": "resp_zen",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.6-luna",
+            "output": [{"type": "web_search_call", "id": "ws_1", "status": "completed"}],
+        }
+
+        with mock.patch.dict(os.environ, {"OPENCODE_GO_API_KEY": "test-key"}), mock.patch(
+            "urllib.request.urlopen",
+            return_value=MockUpstreamResponse(json.dumps(native_response).encode()),
+        ) as urlopen:
+            conn = HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request(
+                "POST",
+                "/v1/responses",
+                json.dumps({
+                    "model": "deepseek-v4-flash-free",
+                    "input": "search",
+                    "tools": [{"type": "web_search"}],
+                    "tool_choice": {"type": "web_search"},
+                }),
+                {"content-type": "application/json"},
+            )
+            response = conn.getresponse()
+            body = json.loads(response.read())
+            conn.close()
+
+        request = urlopen.call_args.args[0]
+        sent = json.loads(request.data)
+        assert response.status == 200
+        assert body["output"][0]["type"] == "web_search_call"
+        assert request.full_url == "https://opencode.ai/zen/v1/responses"
+        assert sent["model"] == "gpt-5.6-luna"
+        assert sent["tools"] == [{"type": "web_search"}]
+        assert sent["tool_choice"] == {"type": "web_search"}
 
 
 class TestStreamingResponse:

@@ -17,6 +17,7 @@ spec:
     metadata:
       labels:
         app: opencode-go-proxy
+        upstream: go
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -25,7 +26,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: proxy
-          image: localhost/opencode-go-proxy:dev-20260812-native-search
+          image: localhost/opencode-go-proxy:dev-20260812-routing-ui
           imagePullPolicy: Never
           args: ["--bind", "0.0.0.0", "--port", "8787"]
           env:
@@ -34,6 +35,8 @@ spec:
                 secretKeyRef:
                   name: opencode-go-proxy-credentials
                   key: upstream-api-key
+            - name: OPENCODE_DASHBOARD_PEERS
+              value: '[{"name":"OpenCode Go","upstream":"Go","probe_url":"http://proxy:8787/v1","public_url":"http://pb62.local:32095/v1"},{"name":"OpenCode Zen","upstream":"Zen","probe_url":"http://proxy-zen:8787/v1","public_url":"http://pb62.local:32096/v1"}]'
           ports:
             - name: http
               containerPort: 8787
@@ -71,11 +74,91 @@ spec:
   type: NodePort
   selector:
     app: opencode-go-proxy
+    upstream: go
   ports:
     - name: http
       port: 8787
       targetPort: http
       nodePort: 32095
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxy-zen
+  namespace: opencode-go-proxy-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opencode-go-proxy
+      upstream: zen
+  template:
+    metadata:
+      labels:
+        app: opencode-go-proxy
+        upstream: zen
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: proxy
+          image: localhost/opencode-go-proxy:dev-20260812-routing-ui
+          imagePullPolicy: Never
+          args: ["--bind", "0.0.0.0", "--port", "8787", "--upstream", "zen"]
+          env:
+            - name: OPENCODE_GO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: opencode-go-proxy-credentials
+                  key: upstream-api-key
+            - name: OPENCODE_DASHBOARD_PEERS
+              value: '[{"name":"OpenCode Go","upstream":"Go","probe_url":"http://proxy:8787/v1","public_url":"http://pb62.local:32095/v1"},{"name":"OpenCode Zen","upstream":"Zen","probe_url":"http://proxy-zen:8787/v1","public_url":"http://pb62.local:32096/v1"}]'
+          ports:
+            - name: http
+              containerPort: 8787
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 24Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy-zen
+  namespace: opencode-go-proxy-test
+spec:
+  type: NodePort
+  selector:
+    app: opencode-go-proxy
+    upstream: zen
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
+      nodePort: 32096
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -91,6 +174,13 @@ spec:
     - from:
         - ipBlock:
             cidr: 192.168.36.0/24
+      ports:
+        - protocol: TCP
+          port: 8787
+    - from:
+        - podSelector:
+            matchLabels:
+              app: opencode-go-proxy
       ports:
         - protocol: TCP
           port: 8787
@@ -110,3 +200,10 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+    - to:
+        - podSelector:
+            matchLabels:
+              app: opencode-go-proxy
+      ports:
+        - protocol: TCP
+          port: 8787

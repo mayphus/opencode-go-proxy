@@ -4,6 +4,14 @@
 
 ### Added
 
+- Zero-dependency read-only web dashboard for Go/Zen health, model discovery, capability routing,
+  and copyable Desktop setup; its probes use only `/health` and `/models` and spend no tokens.
+- OpenCode Zen mode with compatible Responses and Chat Completions model discovery, native
+  passthrough where available, a separate Codex provider/catalog installer, and a PB62 test
+  service on NodePort `32096`.
+- Capability-aware routing that preserves the original Responses request and moves it to GPT
+  5.6 Luna when the selected Zen model lacks image, search, code interpreter, image generation,
+  MCP, hosted shell, skills, computer use, file search, or compaction support.
 - Native macOS menu bar app in `macos/MenuBarApp` (Swift/AppKit, SwiftPM): short status
   icon, live health check, start/stop of the proxy as a child process, open logs,
   reveal log file, copy port. Build with `swift build` in `macos/MenuBarApp` (macOS 13+).
