@@ -102,6 +102,44 @@ class TestHealthAndModels:
             if absent:
                 assert absent not in ids
 
+    @pytest.mark.parametrize(
+        ("path", "model"),
+        (
+            ("/zen/go/v1/models/gpt-5.6-luna", "gpt-5.6-luna"),
+            ("/zen/v1/models/deepseek-v4-flash-free", "deepseek-v4-flash-free"),
+        ),
+    )
+    def test_combined_model_can_be_retrieved_by_endpoint(self, server, path, model):
+        port, httpd = server
+        httpd.config.upstream = "combined"
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        conn.close()
+
+        assert resp.status == 200
+        assert body == {"id": model, "object": "model"}
+
+    @pytest.mark.parametrize(
+        "path",
+        (
+            "/zen/go/v1/models/deepseek-v4-flash-free",
+            "/zen/v1/models/not-a-model",
+        ),
+    )
+    def test_combined_unknown_or_cross_product_model_is_not_found(self, server, path):
+        port, httpd = server
+        httpd.config.upstream = "combined"
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        body = json.loads(resp.read())
+        conn.close()
+
+        assert resp.status == 404
+        assert body["error"]["message"] == "not found"
+
     def test_dashboard_is_served_without_model_request(self, server):
         port, _ = server
         conn = HTTPConnection("127.0.0.1", port, timeout=5)

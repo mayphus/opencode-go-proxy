@@ -20,7 +20,7 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from . import __version__
 from .codex_config import configure_codex
@@ -129,13 +129,22 @@ class ResponsesProxyHandler(BaseHTTPRequestHandler):
         if api_path in {"/health", "/v1/health"}:
             self._send_json({"status": "ok"})
             return
-        if api_path in {"/models", "/v1/models"} and not _is_combined_upstream(config):
+        if not _is_combined_upstream(config):
             models = ZEN_MODELS if _is_zen_upstream(config) else KNOWN_MODELS
-            self._send_json({
-                "object": "list",
-                "data": [{"id": slug, "object": "model"} for slug in sorted(models)],
-            })
-            return
+            model_path = urlsplit(api_path).path
+            if model_path in {"/models", "/v1/models"}:
+                self._send_json({
+                    "object": "list",
+                    "data": [{"id": slug, "object": "model"} for slug in sorted(models)],
+                })
+                return
+            for prefix in ("/models/", "/v1/models/"):
+                if model_path.startswith(prefix):
+                    model = unquote(model_path[len(prefix):])
+                    if model in models:
+                        self._send_json({"id": model, "object": "model"})
+                        return
+                    break
         self._send_json({"error": {"message": "not found"}}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
