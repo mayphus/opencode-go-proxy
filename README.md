@@ -1,3 +1,8 @@
+> **Archived after consolidation — 18 September 2026.** Maintenance and original Git history now live in [opencode-responses-gateway](https://github.com/mayphus/opencode-responses-gateway). This repository is retained as a historical reference; use the successor for new work.
+> This is a source-repository consolidation. Existing installations, hosted resources and stored data were not migrated. See the successor’s `legacy/README.md` for the preserved implementation and limitations.
+
+---
+
 # OpenCode Go Proxy
 
 [![CI](https://github.com/zhengsanniu/opencode-go-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/zhengsanniu/opencode-go-proxy/actions/workflows/ci.yml)
